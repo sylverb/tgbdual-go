@@ -543,7 +543,7 @@ void mbc::mbc3_write(word adr,byte dat)
 		}
 		break;
 	case 1:
-		rom_page=ref_gb->get_rom()->get_rom()+0x4000*((dat==0?1:dat)&0x7F&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
+		rom_page=ref_gb->get_rom()->get_rom()+0x4000*((dat==0?1:dat)&(ref_gb->get_rom()->get_info()->rom_size >= 7?0xFF:0x7F)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
 		break;
 	case 2:
 		if (dat<8){
