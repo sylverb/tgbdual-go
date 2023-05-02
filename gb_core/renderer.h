@@ -42,7 +42,6 @@ public:
 	virtual void render_screen(byte *buf,int width,int height,int depth)=0;
 	virtual int check_pad()=0;
 	virtual word map_color(word gb_col)=0;
-	virtual word unmap_color(word gb_col)=0;
 
 	virtual byte get_time(int type)=0;
 	virtual void set_time(int type,byte dat)=0;

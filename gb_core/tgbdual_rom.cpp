@@ -23,11 +23,15 @@
 #include "gb.h"
 #include <stdlib.h>
 #include <string.h>
-
+#ifdef TARGET_GNW
+#include "gw_malloc.h"
+#endif
 rom::rom()
 {
 	b_loaded     = false;
-   b_persistent = false;
+#ifndef TARGET_GNW
+	b_persistent = false;
+#endif
 
 	dat          = NULL;
 	sram         = NULL;
@@ -35,9 +39,11 @@ rom::rom()
 
 rom::~rom()
 {
+#ifndef TARGET_GNW
    if (!b_persistent)
       free(dat);
 	free(sram);
+#endif
 }
 
 bool rom::has_battery()
@@ -60,11 +66,13 @@ bool rom::load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent)
 {
 	byte momocol_title[16]={0x4D,0x4F,0x4D,0x4F,0x43,0x4F,0x4C,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
 
+#ifndef TARGET_GNW
 	if (b_loaded){
       if (!persistent)
          free(dat);
 		free(sram);
 	}
+#endif
 
 	memcpy(info.cart_name,buf+0x134,16);
 	info.cart_name[16]='\0';
@@ -72,6 +80,7 @@ bool rom::load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent)
 	info.cart_type=buf[0x147];
 	info.rom_size=buf[0x148];
 	info.ram_size=buf[0x149];
+	info.rom_file_size=size;
 
 	if (memcmp(info.cart_name,momocol_title,16)==0){
 		info.cart_type=0x100;//mmm01
@@ -84,6 +93,7 @@ bool rom::load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent)
 	if (info.rom_size>8)
 		return false;
 
+#ifndef TARGET_GNW
    if (persistent)
       dat = (byte*)buf;
    else
@@ -91,14 +101,23 @@ bool rom::load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent)
       dat=(byte*)malloc(size);
       memcpy(dat,buf,size);
    }
+#else
+   dat = (byte*)buf;
+#endif
 	first_page=dat;
 
+#ifndef TARGET_GNW
 	sram=(byte*)malloc(get_sram_size());
 	if (ram)
 		memcpy(sram,ram,ram_size&0xffffff00);
+#else
+	sram=(byte*)itc_calloc(1,get_sram_size());
+#endif
 
 	b_loaded     = true;
-   b_persistent = persistent;
+#ifndef TARGET_GNW
+	b_persistent = persistent;
+#endif
 
 	return true;
 }

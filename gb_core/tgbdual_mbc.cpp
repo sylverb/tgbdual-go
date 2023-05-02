@@ -22,6 +22,71 @@
 // MBC emulation unit (MBC1/2/3/5/7,HuC-1,MMM01,Rumble,RTC,Motion-Sensor,etc...)
 
 #include "gb.h"
+//#ifdef TARGET_GNW
+extern "C" {
+#include <odroid_system.h>
+#include <assert.h>
+#include "lzma.h"
+#ifdef TARGET_GNW
+#ifndef LINUX_EMU
+#include "common.h"
+#include "gw_linker.h"
+#include "heap.hpp"
+#endif
+#include "gw_malloc.h"
+#endif
+
+extern const char *ROM_EXT;
+
+#define _MAX_GB_ROM_BANK_IN_CACHE 33
+#define _MAX_GB_ROM_BANKS 512
+static uint32_t gb_rom_comp_bank_offset[_MAX_GB_ROM_BANKS];
+
+enum {
+    COMPRESSION_NONE,
+    COMPRESSION_LZMA,
+};
+typedef uint8_t compression_t;
+
+static bool rom_bank_cache_enabled;
+static compression_t rom_comp_type;
+
+/* SRAM memory :  ROM bank cache */
+//unsigned char GB_ROM_SRAM_CACHE[BANK_SIZE*_MAX_GB_ROM_BANK_IN_CACHE];
+unsigned char *GB_ROM_SRAM_CACHE;
+
+/*Compressed ROM */
+static const unsigned char *GB_ROM_COMP;
+
+//
+// Cache management
+//
+
+/* Number of banks in ROM */
+static short rom_banks_number =0;
+
+/* Maximum number of bank can be stored in cache using SRAM */
+static uint8_t bank_cache_size = 0;
+
+#define _NOT_IN_CACHE   0x80
+#define _NOT_COMPRESSED 0x40
+static uint8_t bank_to_cache_idx[_MAX_GB_ROM_BANKS];
+
+/* cache timestamp
+if timestamp is 0, the bank is not in cache */
+static uint32_t cache_ts[_MAX_GB_ROM_BANK_IN_CACHE];
+
+struct romcache
+{
+	byte* bank[512];
+	char name[20];
+	int length;
+	int checksum;
+} romcache;
+}
+
+
+//#endif
 
 mbc::mbc(gb *ref)
 {
@@ -38,7 +103,14 @@ mbc::~mbc()
 void mbc::reset()
 {
 	ref_gb->get_rom()->set_first(0);
-	rom_page=ref_gb->get_rom()->get_rom();
+	if (ref_gb->get_rom()->get_rom() != NULL) {
+#ifdef TARGET_GNW
+		ref_gb->get_cpu()->init_ram();
+#endif
+		gb_rom_compress_load();
+		rom_bank0 = ref_gb->get_rom()->get_rom();
+		set_bank(1);
+	}
 	sram_page=ref_gb->get_rom()->get_sram();
 
 	mbc1_16_8=true;
@@ -474,8 +546,126 @@ void mbc::set_state(int dat)
 
 void mbc::set_page(int rom,int sram)
 {
-	rom_page=ref_gb->get_rom()->get_rom()+rom*0x4000;
+	set_bank(rom);
 	sram_page=ref_gb->get_rom()->get_sram()+sram*0x2000;
+}
+
+void mbc::rom_loadbank_cache(short bank)
+{
+	size_t OFFSET; /* offset in memory cache of requested bank OFFSET = bank * BANK_SIZE */
+	uint8_t reclaimed_idx=0;  /* reclaimed bank idx in the cache */
+	static uint8_t active_idx = 0;  /* last requested idx in cache */
+	short reclaimed_bank=0;  /* reclaimed bank */
+
+	#ifdef _TRACE_GB_CACHE
+		//printf("L:%03d %03d ",bank, bank_to_cache_idx[bank]);
+	#endif
+
+	/* THE BANK IS UNCOMPRESSED AND CAN BE READ DIRECTLY IN ROM */
+	if (bank_to_cache_idx[bank] & _NOT_COMPRESSED) {
+        switch(rom_comp_type) {
+            case COMPRESSION_LZMA: {
+                assert(bank == 0);
+                OFFSET = gb_rom_comp_bank_offset[bank];
+                // No frame, will have to implement if we want more than just
+                // bank0 to be not compressed.
+                romcache.bank[bank] = (unsigned char *)&GB_ROM_COMP[OFFSET];
+                break;
+            }
+        }
+
+		#ifdef _TRACE_GB_CACHE
+			//printf("Direct\n");
+		#endif
+	/* THE BANK IS NOT IN THE CACHE AND IS COMPRESSED */
+	} else if (bank_to_cache_idx[bank] & _NOT_IN_CACHE) {
+		printf("rom_loadbank_cache(%d)\n",bank);
+		/* look for the older bank in cache as a candidate */
+		for (int idx = 0; idx < bank_cache_size; idx++)
+			if (cache_ts[reclaimed_idx] > cache_ts[idx]) reclaimed_idx = idx;
+
+		/* look for the corresponding allocated bank (skip bank0) */
+		for (int bank_idx=1; bank_idx < rom_banks_number; bank_idx++)
+			if (bank_to_cache_idx[bank_idx] == reclaimed_idx) reclaimed_bank = bank_idx;
+
+		/* reclaim the removed bank from the cache if necessary */
+		if ( (bank_to_cache_idx[reclaimed_bank] <= bank_cache_size)  &  (reclaimed_bank !=0)) {
+			bank_to_cache_idx[reclaimed_bank] 	= _NOT_IN_CACHE;
+			romcache.bank[reclaimed_bank] 			= NULL;
+
+		#ifdef _TRACE_GB_CACHE
+			printf("S -bank%03d +bank%03d cch=%02d TS=%ld\n",reclaimed_bank,bank, reclaimed_idx, cache_ts[reclaimed_idx]);
+			swap_count++;
+
+		} else {
+			printf("F +bank%03d cch=%02d TS=%ld\n",bank, reclaimed_idx, cache_ts[reclaimed_idx]);
+		#endif
+		}
+
+		/* allocate the requested bank in cache */
+		bank_to_cache_idx[bank] = reclaimed_idx;
+        OFFSET = reclaimed_idx * BANK_SIZE;
+
+		wdog_refresh();
+
+        switch(rom_comp_type){
+            case COMPRESSION_LZMA: {
+				int rom_size = ref_gb->get_rom()->get_info()->rom_file_size;
+				size_t n_decomp_bytes;
+				
+                n_decomp_bytes = lzma_inflate(
+                        &GB_ROM_SRAM_CACHE[OFFSET],
+                        BANK_SIZE ,
+                        ref_gb->get_rom()->get_rom()+gb_rom_comp_bank_offset[bank],
+                        rom_size - gb_rom_comp_bank_offset[bank]
+                        );
+                assert(n_decomp_bytes == BANK_SIZE);
+                break;
+            }
+        }
+
+		/* set the bank address to the right bank address in cache */
+		romcache.bank[bank] = (unsigned char *)&GB_ROM_SRAM_CACHE[OFFSET];
+
+		/* refresh timestamp and score*/
+		cache_ts[reclaimed_idx] = HAL_GetTick();
+
+		active_idx = reclaimed_idx;
+
+	/* HIT CASE: the bank is already in the cache */
+	} else {
+
+		active_idx = bank_to_cache_idx[bank];
+
+		OFFSET = active_idx * BANK_SIZE;
+
+		/* set the bank address to the right bank address in cache */
+		romcache.bank[bank] = (unsigned char *)&GB_ROM_SRAM_CACHE[OFFSET];
+
+		/* refresh timestamp and score */
+		cache_ts[active_idx] = HAL_GetTick();
+
+		#ifdef _TRACE_GB_CACHE
+			//printf("H bnk=%02d cch=%02d\n", bank, bank_to_cache_idx[bank]);
+		#endif
+	}
+	rom_page = romcache.bank[bank];
+
+	#ifdef _TRACE_GB_CACHE
+	//just to break using BSOD
+	//	if (swap_count > 200) assert(0);
+	#endif
+
+}
+
+
+void mbc::set_bank(int bank)
+{
+	current_bank = bank;
+	if (rom_bank_cache_enabled)
+		rom_loadbank_cache(bank);
+	else
+		rom_page = &ref_gb->get_rom()->get_rom()[bank*BANK_SIZE];
 }
 
 static int rom_size_tbl[]={2,4,8,16,32,64,128,256,512};
@@ -489,11 +679,11 @@ void mbc::mbc1_write(word adr,byte dat)
 			break;
 		case 1:
 			mbc1_dat=(mbc1_dat&0x60)+(dat&0x1F);
-			rom_page=ref_gb->get_rom()->get_rom()+0x4000*((mbc1_dat==0?1:mbc1_dat)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
+			set_bank((mbc1_dat==0?1:mbc1_dat)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1));
 			break;
 		case 2:
 			mbc1_dat=((dat<<5)&0x60)+(mbc1_dat&0x1F);
-			rom_page=ref_gb->get_rom()->get_rom()+0x4000*((mbc1_dat==0?1:mbc1_dat)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
+			set_bank((mbc1_dat==0?1:mbc1_dat)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1));
 			break;
 		case 3:
 			if (dat&1)
@@ -509,7 +699,7 @@ void mbc::mbc1_write(word adr,byte dat)
 		case 0:
 			break;
 		case 1:
-			rom_page=ref_gb->get_rom()->get_rom()+0x4000*((dat==0?1:dat)&0x1F&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
+			set_bank((dat==0?1:dat)&0x1F&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1));
 			break;
 		case 2:
 			sram_page=ref_gb->get_rom()->get_sram()+0x2000*(dat&3);
@@ -528,7 +718,7 @@ void mbc::mbc1_write(word adr,byte dat)
 void mbc::mbc2_write(word adr,byte dat)
 {
 	if ((adr>=0x2000)&&(adr<=0x3FFF))
-		rom_page=ref_gb->get_rom()->get_rom()+0x4000*(((dat&0x0F)==0?1:dat&0x0F)-1);
+		set_bank(((dat&0x0F)==0?1:dat&0x0F));
 }
 
 void mbc::mbc3_write(word adr,byte dat)
@@ -543,7 +733,7 @@ void mbc::mbc3_write(word adr,byte dat)
 		}
 		break;
 	case 1:
-		rom_page=ref_gb->get_rom()->get_rom()+0x4000*((dat==0?1:dat)&(ref_gb->get_rom()->get_info()->rom_size >= 7?0xFF:0x7F)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
+		set_bank((dat==0?1:dat)&(ref_gb->get_rom()->get_info()->rom_size >= 7?0xFF:0x7F)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1));
 		break;
 	case 2:
 		if (dat<8){
@@ -576,6 +766,7 @@ void mbc::mbc3_write(word adr,byte dat)
 
 void mbc::mbc5_write(word adr,byte dat)
 {
+//	printf("mbc5_write %x\n",adr);
 	switch(adr>>12){
 	case 0:
 	case 1:
@@ -583,12 +774,13 @@ void mbc::mbc5_write(word adr,byte dat)
 	case 2:
 		mbc5_dat&=0x0100;
 		mbc5_dat|=dat;
-		rom_page=ref_gb->get_rom()->get_rom()+0x4000*(mbc5_dat&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
+		set_bank(mbc5_dat&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1));
+//		rom_page=ref_gb->get_rom()->get_rom()+0x4000*(mbc5_dat&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
 		break;
 	case 3:
 		mbc5_dat&=0x00FF;
 		mbc5_dat|=(dat&1)<<8;
-		rom_page=ref_gb->get_rom()->get_rom()+0x4000*(mbc5_dat&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
+		set_bank(mbc5_dat&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1));
 		break;
 	case 4:
 	case 5:
@@ -611,8 +803,7 @@ void mbc::mbc7_write(word adr,byte dat)
 	case 0:
 		break;
 	case 1:
-		rom_page=ref_gb->get_rom()->get_rom()+0x4000*((dat==0?1:dat)&0x7F&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
-//		rom_page=ref_gb->get_rom()->get_rom()+0x4000*(dat&0x3f)-0x4000;
+		set_bank((dat==0?1:dat)&0x7F&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1));
 		break;
 	case 2:
 		if (dat<8){
@@ -636,11 +827,11 @@ void mbc::huc1_write(word adr,byte dat)
 			break;
 		case 1:
 			huc1_dat=(huc1_dat&0x60)+(dat&0x3F);
-			rom_page=ref_gb->get_rom()->get_rom()+0x4000*((huc1_dat==0?1:huc1_dat)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
+			set_bank((huc1_dat==0?1:huc1_dat)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1));
 			break;
 		case 2:
 			huc1_dat=((dat<<5)&0x60)+(huc1_dat&0x3F);
-			rom_page=ref_gb->get_rom()->get_rom()+0x4000*((huc1_dat==0?1:huc1_dat)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
+			set_bank((huc1_dat==0?1:huc1_dat)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1));
 			break;
 		case 3:
 			if (dat&1)
@@ -656,7 +847,7 @@ void mbc::huc1_write(word adr,byte dat)
 		case 0:
 			break;
 		case 1:
-			rom_page=ref_gb->get_rom()->get_rom()+0x4000*((dat==0?1:dat)&0x3F&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
+			set_bank((dat==0?1:dat)&0x3F&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1));
 			break;
 		case 2:
 			sram_page=ref_gb->get_rom()->get_sram()+0x2000*(dat&3);
@@ -694,7 +885,7 @@ void mbc::huc3_write(word adr,byte dat)
 		}
 		break;
 	case 1:
-		rom_page=ref_gb->get_rom()->get_rom()+0x4000*((dat==0?1:dat)&0x7F&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
+		set_bank((dat==0?1:dat)&0x7F&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1));
 		break;
 	case 2:
 		if (dat<8){
@@ -739,11 +930,11 @@ void mbc::mmm01_write(word adr,byte dat)
 			break;
 		case 1:
 			mbc1_dat=(mbc1_dat&0x60)+(dat&0x1F);
-			rom_page=ref_gb->get_rom()->get_rom()+0x4000*((mbc1_dat==0?1:mbc1_dat)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
+			set_bank((mbc1_dat==0?1:mbc1_dat)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1));
 			break;
 		case 2:
 			mbc1_dat=((dat<<5)&0x60)+(mbc1_dat&0x1F);
-			rom_page=ref_gb->get_rom()->get_rom()+0x4000*((mbc1_dat==0?1:mbc1_dat)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
+			set_bank((mbc1_dat==0?1:mbc1_dat)&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1));
 			break;
 		case 3:
 			if (dat&1)
@@ -759,11 +950,11 @@ void mbc::mmm01_write(word adr,byte dat)
 		case 0:
 			break;
 		case 1:
-			rom_page=ref_gb->get_rom()->get_rom()+0x4000*(((dat&3)*0x10+(dat==0?1:dat))&0x0f&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1))-0x4000;
+			set_bank(((dat&3)*0x10+(dat==0?1:dat))&0x0f&(rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1));
 			break;
 		case 2:
 			ref_gb->get_rom()->set_first((dat&3)*0x10);
-			rom_page=ref_gb->get_rom()->get_rom()+0x4000*((dat&3)*0x10);
+			set_bank(((dat&3)*0x10)+1);
 			mbc1_dat=dat&3;
 //			sram_page=ref_gb->get_rom()->get_sram()+0x2000*(dat&3);
 			break;
@@ -778,15 +969,105 @@ void mbc::mmm01_write(word adr,byte dat)
 	}
 }
 
+void mbc::gb_rom_compress_load(){
+    /* src pointer to the ROM data in the external flash (raw or compressed) */
+    const unsigned char *src = ref_gb->get_rom()->get_rom();
+	rom_bank_cache_enabled = false;
+
+    if (strcmp(ROM_EXT, "lzma") == 0)
+		rom_comp_type = COMPRESSION_LZMA;
+    else
+		rom_comp_type = COMPRESSION_NONE;
+
+    if (rom_comp_type == COMPRESSION_NONE) {
+		return;
+	}
+
+
+#ifdef LINUX_EMU
+    bank_cache_size = _MAX_GB_ROM_BANK_IN_CACHE;
+#else
+    bank_cache_size = heap_free_mem() / BANK_SIZE;
+#endif
+    size_t available_size = bank_cache_size * BANK_SIZE;
+    GB_ROM_COMP        = (unsigned char *)src;
+#ifndef LINUX_EMU
+    GB_ROM_SRAM_CACHE = (unsigned char *)heap_alloc_mem(available_size);
+#else
+    GB_ROM_SRAM_CACHE = (unsigned char *)itc_malloc(available_size);
+#endif
+    /* dest pointer to the ROM data in the internal RAM (raw) */
+    unsigned char *dest = (unsigned char *)GB_ROM_SRAM_CACHE;
+
+	size_t rom_size = ref_gb->get_rom()->get_info()->rom_file_size;
+    printf("Compressed ROM detected #%d\n", rom_size);
+    printf("Uncompressing to %p. %ld bytes available.\n", dest, available_size);
+
+
+    if (bank_cache_size > _MAX_GB_ROM_BANK_IN_CACHE) bank_cache_size = _MAX_GB_ROM_BANK_IN_CACHE;
+
+    printf("SRAM cache size : %d banks\n", bank_cache_size);
+
+    /* parse compressed ROM to determine:
+    - number of banks (16KB trunks)
+    - banks offset as a compressed chunk
+    */
+
+    /* clean up cache information */
+    memset(bank_to_cache_idx, _NOT_IN_CACHE, sizeof bank_to_cache_idx);
+    memset(cache_ts, 0, sizeof cache_ts);
+    memset(gb_rom_comp_bank_offset, 0, sizeof( gb_rom_comp_bank_offset));
+    
+    uint32_t bank_idx = 0;
+
+    switch(rom_comp_type){
+        case COMPRESSION_LZMA: {
+            size_t src_offset = BANK_SIZE;
+            unsigned char lzma_heap[LZMA_BUF_SIZE];
+            ISzAlloc allocs;
+            ELzmaStatus status;
+
+            lzma_init_allocs(&allocs, lzma_heap);
+
+            gb_rom_comp_bank_offset[0] = 0;
+            bank_to_cache_idx[0] = _NOT_COMPRESSED;
+
+            for(bank_idx=1; src_offset < rom_size; bank_idx++){
+                wdog_refresh();
+                size_t src_buf_size = rom_size - src_offset; 
+                size_t dst_buf_size = available_size;
+                SRes res; 
+
+                gb_rom_comp_bank_offset[bank_idx] = src_offset;
+
+                res = LzmaDecode(
+                    &GB_ROM_SRAM_CACHE[0], &dst_buf_size,
+                    &GB_ROM_COMP[src_offset], &src_buf_size,
+                    lzma_prop_data, 5,
+                    LZMA_FINISH_ANY, &status,
+                    &allocs);
+                assert(res == SZ_OK);
+                assert(status == LZMA_STATUS_FINISHED_WITH_MARK);
+                assert(dst_buf_size == BANK_SIZE);
+                
+                src_offset += src_buf_size; 
+            }
+
+            break;
+        }
+    }
+    rom_banks_number       = bank_idx;
+    rom_bank_cache_enabled = true;
+    printf("Compressed ROM checked!\n");
+}
 
 void mbc::serialize(serializer &s)
 {
-	byte*  rom = ref_gb->get_rom()->get_rom();
 	byte* sram = ref_gb->get_rom()->get_sram();
 
 	int tmp;
 
-	tmp = ( rom_page- rom)/0x4000; s_VAR(tmp);  rom_page =  rom + tmp*0x4000;
+	s_VAR(current_bank); set_bank(current_bank);
 	tmp = (sram_page-sram)/0x2000; s_VAR(tmp); sram_page = sram + tmp*0x2000;
 
 	tmp = get_state(); s_VAR(tmp); set_state(tmp);

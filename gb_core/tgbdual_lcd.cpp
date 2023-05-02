@@ -23,6 +23,24 @@
 
 #include "gb.h"
 
+static word dmg_palettes[][4] = {
+ 	{ 0x7FFF, 0x56B5, 0x4631, 0x0000 }, // GB_TGBDUAL_PALETTE
+ 	{ 0x7FFF, 0x5AD6, 0x318C, 0x0000 }, // GB_2BGRAYS_PALETTE
+ 	{ 0x0272, 0x0DCA, 0x0D45, 0x0102 }, // GB_DMGREEN_PALETTE
+ 	{ 0x6BDD, 0x3ED4, 0x1D86, 0x0860 }, // GB_DEFAULT_PALETTE
+ 	{ 0x6BFC, 0x3B12, 0x31C8, 0x1060 }, // GB_G&WDEFN_PALETTE
+ 	{ 0x5BFF, 0x3F0F, 0x222D, 0x10EB }, // GB_LINKSAW_PALETTE
+ 	{ 0x639E, 0x263A, 0x10D4, 0x2866 }, // GB_NSUPRGB_PALETTE
+ 	{ 0x36D5, 0x260E, 0x1D47, 0x18C4 }, // GB_NGBARNE_PALETTE
+ 	{ 0x6FDF, 0x36DE, 0x4996, 0x34AC }, // GB_GRAPEFR_PALETTE
+ 	{ 0x6739, 0x6E6D, 0x4588, 0x1882 }, // GB_MEGAMAN_PALETTE
+ 	{ 0x7FBF, 0x46DE, 0x4DD0, 0x0843 }, // GB_POKEMON_PALETTE
+ 	{ 0x5719, 0x4694, 0x298D, 0x0CA4 }, // GB_NSWITC1_PALETTE
+ 	{ 0x4294, 0x3610, 0x1D4A, 0x0883 }, // GB_NSWITC2_PALETTE
+ 	{ 0x3E75, 0x3211, 0x1D4B, 0x0884 }, // GB_NSWITC3_PALETTE
+ 	{ 0x2E54, 0x21F0, 0x154B, 0x0885 }  // GB_NSWITC4_PALETTE
+ };
+
 #define ROL_BYTE(var, bits) (var = ((var) & (-1U << 8)) \
                              | (((var)<<(bits))&0xff) \
                              | ((var) >> (8-(bits))))
@@ -31,18 +49,29 @@ lcd::lcd(gb *ref)
 {
 	ref_gb=ref;
 
-	byte dat[]={31,21,11,0};
-
-	for (int i=0;i<4;i++){
-		m_pal16[i]=ref_gb->get_renderer()->map_color(dat[i]|(dat[i]<<5)|(dat[i]<<10));
-		m_pal32[i]=((dat[i]<<16)|(dat[i]<<8)|dat[i]);
-	}
+	set_palette(0); // Default GB palette
 
 	reset();
 }
 
 lcd::~lcd()
 {
+}
+
+char lcd::get_current_palette() {
+	return cur_palette;
+}
+
+char lcd::get_palette_count() {
+	return sizeof(dmg_palettes)/sizeof(dmg_palettes[0]);
+}
+
+void lcd::set_palette(char index)
+{
+	cur_palette = index;
+	for (int i=0;i<4;i++){
+		m_pal16[i]=ref_gb->get_renderer()->map_color(dmg_palettes[index][i]);
+	}
 }
 
 void lcd::set_enable(int layer,bool enable)
@@ -65,33 +94,33 @@ void lcd::reset()
 void lcd::bg_render(void *buf,int scanline)
 {
 	int i,x,y;
-   int start, y_div_8, prefix = 0;
-   byte *trans, *now_tile;
+	int start, y_div_8, prefix = 0;
+ 	byte *trans, *now_tile;
 	dword tmp_dat, calc1, calc2;
-   word back, pat, *dat;
-   word *now_share, *now_pat;
-   byte *vrams[2];
+	word back, pat, *dat;
+	word *now_share, *now_pat;
+	byte *vrams[2];
 	word share  = 0x0000;//prefix
 	word pal[4];
 	byte tile;
 
 	if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x01)||
 		(ref_gb->get_regs()->WY<=(dword)scanline&&ref_gb->get_regs()->WX<8&&(ref_gb->get_regs()->LCDC&0x20)))
-   {
+	{
 		if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x01))
-      {
-         word *tmp_w=(word*)buf+160*scanline;
-         word tmp_dat=ref_gb->get_renderer()->map_color(0x7fff);
-         for (int t=0;t<160;t++)
-            *(tmp_w++)=tmp_dat;
-      }
+		{
+			word *tmp_w=(word*)buf+160*scanline;
+			word tmp_dat=ref_gb->get_renderer()->map_color(0x7fff);
+			for (int t=0;t<160;t++)
+				*(tmp_w++)=tmp_dat;
+		}
 		return;
 	}
 
 	back      = (ref_gb->get_regs()->LCDC&0x08)?0x1C00:0x1800;
 	pat       = (ref_gb->get_regs()->LCDC&0x10)?0x0000:0x1000;
 	vrams[0]  = ref_gb->get_cpu()->get_vram();
-   vrams[1]  = ref_gb->get_cpu()->get_vram() +0x2000;
+	vrams[1]  = ref_gb->get_cpu()->get_vram() +0x2000;
 
 	pal[0]    = m_pal16[ref_gb->get_regs()->BGP&0x3];
 	pal[1]    = m_pal16[(ref_gb->get_regs()->BGP>>2)&0x3];
@@ -295,7 +324,7 @@ void lcd::sprite_render(void *buf,int scanline)
 			if ((x==-8&&y==-16)||x>160||y>144+15||(y<scanline)||(y>scanline+15))
 				continue;
 			if (scanline-y+15<8)
-         {
+			{
 				now= (atr & 0x40) ? ((y-scanline) & 7) : ((7 - (y - scanline)) & 7);
 				tmp_dat=*(word*)(vram+(tile&0xfe)*16+now*2+((atr&0x40)?16:0));
 			}
@@ -383,9 +412,9 @@ void lcd::bg_render_color(void *buf,int scanline)
 {
 	byte tile;
 	int i,x,y;
-   word back, pat, *pal, *dat;
-   byte *vrams[2];
-   word share=0x0000;//prefix
+	word back, pat, *pal, *dat;
+	byte *vrams[2];
+	word share=0x0000;//prefix
 	trans_count=0;
 
 	// カラーではOFF機能が働かない?(僕のキャンプ場､モンコレナイト)
@@ -405,7 +434,7 @@ void lcd::bg_render_color(void *buf,int scanline)
 	back=(ref_gb->get_regs()->LCDC&0x08)?0x1C00:0x1800;
 	pat=(ref_gb->get_regs()->LCDC&0x10)?0x0000:0x1000;
 	vrams[0] = ref_gb->get_cpu()->get_vram();
-   vrams[1] = ref_gb->get_cpu()->get_vram()+0x2000;
+	vrams[1] = ref_gb->get_cpu()->get_vram()+0x2000;
 
 	y=scanline+ref_gb->get_regs()->SCY;
 	if (y>=256)
@@ -788,8 +817,8 @@ void lcd::render(void *buf,int scanline)
 
 void lcd::serialize(serializer &s)
 {
+	s_VAR(cur_palette); set_palette(cur_palette);
 	s_ARRAY(m_pal16);
-	s_ARRAY(m_pal32);
 	s_ARRAY(col_pal); // the only one that was in the original state format.
 	s_ARRAY(mapped_pal);
 	s_VAR(trans_count);

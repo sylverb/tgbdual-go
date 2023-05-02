@@ -23,6 +23,12 @@
 
 #include "gb.h"
 #include <string.h>
+#ifdef TARGET_GNW
+#include "gw_malloc.h"
+#ifndef LINUX_EMU
+#include "heap.hpp"
+#endif
+#endif
 
 #define Z_FLAG 0x40
 #define H_FLAG 0x10
@@ -33,6 +39,10 @@ cpu::cpu(gb *ref)
 {
 	ref_gb=ref;
 	b_trace=false;
+#ifdef TARGET_GNW
+	ram=NULL;
+	vram=NULL;
+#endif
 
 	for (int i=0;i<256;i++){
 		z802gb[i]=((i&0x40)?0x80:0)|((i&0x10)?0x20:0)|((i&0x02)?0x40:0)|((i&0x01)?0x10:0);
@@ -46,6 +56,34 @@ cpu::~cpu()
 {
 }
 
+#ifdef TARGET_GNW
+void cpu::init_ram()
+{
+#ifndef LINUX_EMU
+	heap_itc_alloc(true);
+#endif
+	if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
+#ifndef LINUX_EMU
+		ram = (byte *)heap_alloc_mem(0x2000*4);
+		vram = (byte *)heap_alloc_mem(0x2000*2);
+#else
+		ram = (byte *)itc_calloc(1,0x2000*4);
+		vram = (byte *)itc_calloc(1,0x2000*2);
+#endif
+	} else {
+#ifndef LINUX_EMU
+		ram = (byte *)heap_alloc_mem(0x2000);
+		vram = (byte *)heap_alloc_mem(0x2000);
+#else
+		ram = (byte *)itc_calloc(1,0x2000);
+		vram = (byte *)itc_calloc(1,0x2000);
+#endif
+	}
+	vram_bank=vram;
+	ram_bank=ram+0x1000;
+}
+#endif
+
 void cpu::reset()
 {
 	regs.AF.w=(ref_gb->get_rom()->get_info()->gb_type>=3)?0x11b0:0x01b0;
@@ -55,9 +93,6 @@ void cpu::reset()
 	regs.I=0;
 	regs.SP=0xFFFE;
 	regs.PC=0x100;
-
-	vram_bank=vram;
-	ram_bank=ram+0x1000;
 
 	rest_clock=0;
 	total_clock=sys_clock=div_clock=0;
@@ -72,8 +107,22 @@ void cpu::reset()
 	last_int=0;
 	int_desable=false;
 
-	memset(ram,0,sizeof(ram));
-	memset(vram,0,sizeof(vram));
+	if (ram != NULL) {
+		if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
+			memset(ram,0,0x2000*4);
+		} else {
+			memset(ram,0,0x2000);
+		}
+		ram_bank=ram+0x1000;
+	}
+	if (vram != NULL) {
+		if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
+			memset(vram,0,0x2000*2);
+		} else {
+			memset(vram,0,0x2000);
+		}
+		vram_bank=vram;
+	}
 	memset(stack,0,sizeof(stack));
 	memset(oam,0,sizeof(oam));
 	memset(spare_oam,0,sizeof(spare_oam));
@@ -130,10 +179,10 @@ byte cpu::read_direct(word adr)
 	switch(adr>>13){
 	case 0:
 	case 1:
-		return ref_gb->get_rom()->get_rom()[adr];//ROM領域 // ROM area
+		return ref_gb->get_mbc()->get_rom_bank0()[adr];//ROM領域 // ROM area
 	case 2:
 	case 3:
-		return ref_gb->get_mbc()->get_rom()[adr];//バンク可能ROM // ROM bank
+		return ref_gb->get_mbc()->get_rom()[adr-0x4000];//バンク可能ROM // ROM bank
 	case 4:
 		return vram_bank[adr&0x1FFF];//8KBVRAM
 	case 5:
@@ -452,11 +501,11 @@ void cpu::io_write(word adr,byte dat)
 			switch(dat>>5){
 			case 0:
 			case 1:
-				memcpy(oam,ref_gb->get_rom()->get_rom()+dat*256,0xA0);
+				memcpy(oam,ref_gb->get_mbc()->get_rom_bank0()+dat*256,0xA0);
 				break;
 			case 2:
 			case 3:
-				memcpy(oam,ref_gb->get_mbc()->get_rom()+dat*256,0xA0);
+				memcpy(oam,ref_gb->get_mbc()->get_rom()+dat*256-0x4000,0xA0);
 				break;
 			case 4:
 				memcpy(oam,vram_bank+(dat&0x1F)*256,0xA0);
@@ -545,7 +594,7 @@ void cpu::io_write(word adr,byte dat)
 				ref_gb->get_cregs()->HDMA5=0;
 /*				dma_dest_bank=vram_bank;
 				if (dma_src<0x4000)
-					dma_src_bank=ref_gb->get_rom()->get_rom();
+					dma_src_bank=ref_gb->get_mbc()->get_rom_bank0();
 				else if (dma_src<0x8000)
 					dma_src_bank=ref_gb->get_mbc()->get_rom()-0x4000;
 				else if (dma_src>=0xA000&&dma_src<0xC000)
@@ -578,11 +627,11 @@ void cpu::io_write(word adr,byte dat)
 				switch(dma_src>>13){
 				case 0:
 				case 1:
-					memcpy(vram_bank+(dma_dest&0x1ff0),ref_gb->get_rom()->get_rom()+(dma_src),16*(dat&0x7F)+16);
+					memcpy(vram_bank+(dma_dest&0x1ff0),ref_gb->get_mbc()->get_rom_bank0()+(dma_src),16*(dat&0x7F)+16);
 					break;
 				case 2:
 				case 3:
-					memcpy(vram_bank+(dma_dest&0x1ff0),ref_gb->get_mbc()->get_rom()+(dma_src),16*(dat&0x7F)+16);
+					memcpy(vram_bank+(dma_dest&0x1ff0),ref_gb->get_mbc()->get_rom()+(dma_src)-0x4000,16*(dat&0x7F)+16);
 					break;
 				case 4:
 					break;
@@ -1008,8 +1057,8 @@ void cpu::serialize(serializer &s)
 	s_VAR(regs);
 
 	if (ref_gb->get_rom()->get_info()->gb_type >= 3) { // GB: 1, SGB: 2, GBC: 3...
-		s_ARRAY(ram);
-		s_ARRAY(vram);
+		s.process(ram, 0x2000*4);
+		s.process(vram,0x2000*2);
 	} else {
 		s.process(ram, 0x2000);
 		s.process(vram,0x2000);

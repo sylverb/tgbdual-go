@@ -17,6 +17,7 @@
    Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 */
 
+#if CHEAT_CODES == 1
 #include "gb.h"
 #include <stdio.h>
 #include <ctype.h>
@@ -26,7 +27,12 @@ cheat::cheat(gb *ref)
 {
 	ref_gb=ref;
 	cheat_list.clear();
+#ifndef TARGET_GNW
 	create_cheat_map();
+#else
+	upper_adr = 0x0000;
+	lower_adr = 0xffff;
+#endif
 }
 
 cheat::~cheat()
@@ -37,19 +43,30 @@ cheat::~cheat()
 void cheat::clear()
 {
 	cheat_list.clear();
+#ifndef TARGET_GNW
 	create_cheat_map();
+#endif
 }
 
 void cheat::add_cheat(cheat_dat *dat)
 {
+	printf("Adding cheat a %x v %x\n",dat->adr,dat->dat);
 	if (dat->code==0)
 		ref_gb->get_cpu()->write(dat->adr,dat->dat);
 	else{
 		cheat_list.push_back(*dat);
+#ifndef TARGET_GNW
 		create_cheat_map();
+#else
+		if (dat->adr > upper_adr)
+			upper_adr = dat->adr;
+		if (dat->adr < lower_adr)
+			lower_adr = dat->adr;
+#endif
 	}
 }
 
+#ifndef TARGET_GNW
 void cheat::delete_cheat(char *name)
 {
 	std::list<cheat_dat>::iterator ite;
@@ -128,6 +145,24 @@ void cheat::create_cheat_map()
 		}while(tmp);
 	}
 }
+#else
+bool cheat::has_cheat(word adr) {
+	if ((adr > upper_adr) || (adr < lower_adr))
+		return false;
+
+	std::list<cheat_dat>::iterator ite;
+	cheat_dat *tmp;
+
+	for (ite=cheat_list.begin();ite!=cheat_list.end();ite++){
+		tmp=&(*ite);
+		if (adr == tmp->adr) {
+			return true;
+		}
+	}
+	return false;
+}
+
+#endif
 
 byte cheat::cheat_read(word adr)
 {
@@ -137,9 +172,10 @@ byte cheat::cheat_read(word adr)
 	for (ite=cheat_list.begin();ite!=cheat_list.end();ite++){
 		tmp=&(*ite);
 
+#ifndef TARGET_GNW
 		if (!tmp->enable)
 			continue;
-
+#endif
 		do{
 			switch(tmp->code){
 			case 0x01:
@@ -180,16 +216,16 @@ byte cheat::cheat_read(word adr)
 			case 0x96:
 			case 0x97:
 				if (tmp->adr==adr)
-            {
-               if ((adr>=0xD000)&&(adr<0xE000))
-               {
-                  if (((ref_gb->get_cpu()->get_ram_bank()-ref_gb->get_cpu()->get_ram())/0x1000)==(tmp->code-0x90))
-                     return tmp->dat;
-                  tmp=NULL;
-               }
-               else
-                  return tmp->dat;
-            }
+				{
+					if ((adr>=0xD000)&&(adr<0xE000))
+					{
+						if (((ref_gb->get_cpu()->get_ram_bank()-ref_gb->get_cpu()->get_ram())/0x1000)==(tmp->code-0x90))
+							return tmp->dat;
+						tmp=NULL;
+					}
+					else
+						return tmp->dat;
+				}
 				break;
 			}
 		}while(tmp);
@@ -202,3 +238,4 @@ byte cheat::cheat_read(word adr)
 void cheat::cheat_write(word adr,byte dat)
 {
 }
+#endif

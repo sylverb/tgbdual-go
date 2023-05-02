@@ -33,7 +33,9 @@ gb::gb(renderer *ref,bool b_lcd,bool b_apu)
 	m_apu=new apu(this);// ROMより後に作られたし // I was made ​​later than the ROM
 	m_mbc=new mbc(this);
 	m_cpu=new cpu(this);
+#if CHEAT_CODES == 1
 	m_cheat=new cheat(this);
+#endif
 	target=NULL;
 
 	m_renderer->reset();
@@ -116,156 +118,6 @@ bool gb::load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent)
 		return true;
 	}
    return false;
-}
-
-// savestate format matching the original TGB dual, pre-libretro port
-void gb::serialize_legacy(serializer &s)
-{
-	int tbl_ram[]={1,1,1,4,16,8};
-
-	s.process(&m_rom->get_info()->gb_type, sizeof(int));
-	bool gbc = m_rom->get_info()->gb_type >= 3; // GB: 1, SGB: 2, GBC: 3...
-
-	int cpu_dat[16]; // only used when gbc is true
-
-	if(gbc) {
-		s.process(m_cpu->get_ram(), 0x2000*4);
-		s.process(m_cpu->get_vram(), 0x2000*2);
-	} else {
-		s.process(m_cpu->get_ram(), 0x2000);
-		s.process(m_cpu->get_vram(), 0x2000);
-	}
-	s.process(m_rom->get_sram(), tbl_ram[m_rom->get_info()->ram_size]*0x2000);
-	s.process(m_cpu->get_oam(), 0xA0);
-	s.process(m_cpu->get_stack(), 0x80);
-
-	int rom_page = (m_mbc->get_rom()-m_rom->get_rom())/0x4000;
-	int ram_page = (m_mbc->get_sram()-m_rom->get_sram())/0x2000;
-	s.process(&rom_page, sizeof(int));
-	s.process(&ram_page, sizeof(int));
-	m_mbc->set_page(rom_page, ram_page); // hackish, but should work.
-	// basically, if we're serializing to count or save, the set_page
-	// should have no effect assuming the calculations above are correct.
-	// tl;dr: "if it's good enough for saving, it's good enough for loading"
-
-	if(gbc) {
-		m_cpu->save_state(cpu_dat);
-
-		s.process(cpu_dat+0, 2*sizeof(int)); //int_page, vram_page
-		/* s.process(cpu_dat+1, sizeof(int)); ^ just serialize both in one go */
-	}
-
-	s.process(m_cpu->get_regs(), sizeof(cpu_regs)); // cpu_reg
-	s.process(&regs, sizeof(gb_regs)); //sys_reg
-
-	if(gbc) {
-		s.process(&c_regs, sizeof(gbc_regs)); //col_reg
-		s.process(m_lcd->get_pal(0), sizeof(word)*8*4*2); //palette
-	}
-
-	int halt = !! (*m_cpu->get_halt());
-	s.process(&halt, sizeof(int));
-	(*m_cpu->get_halt()) = !! halt; // same errata as above
-
-	// Originally the number of clocks until serial communication expires
-	int dmy = 0;
-	s.process(&dmy, sizeof(int));
-
-	int mbc_dat = m_mbc->get_state();
-	s.process(&mbc_dat, sizeof(int)); //MBC
-	m_mbc->set_state(mbc_dat);
-
-	int ext_is = !! m_mbc->is_ext_ram();
-	s.process(&ext_is, sizeof(int));
-	m_mbc->set_ext_is(!! ext_is);
-
-	if(gbc) {
-		// Many additional specifications
-		/* i think this is inefficient...
-		s.process(cpu_dat+2, sizeof(int));
-
-		s.process(cpu_dat+3, sizeof(int));
-		s.process(cpu_dat+4, sizeof(int));
-		s.process(cpu_dat+5, sizeof(int));
-		s.process(cpu_dat+6, sizeof(int));
-
-		s.process(cpu_dat+7, sizeof(int));
-		*/
-		s.process(cpu_dat+2, 6*sizeof(int));
-		m_cpu->restore_state(cpu_dat); // same errata as above
-	}
-
-	// Added ver 1.1
-	s.process(m_apu->get_stat(), sizeof(apu_stat));
-	s.process(m_apu->get_mem(), 0x30);
-	s.process(m_apu->get_stat_cpy(), sizeof(apu_stat));
-
-	byte resurved[256];
-	memset(resurved, 0, 256);
-	s.process(resurved, 256); // Reserved for future use
-}
-
-
-// TODO: put 'serialize' in other classes (cpu, mbc, ...) and call it from here.
-void gb::serialize_firstrev(serializer &s)
-{
-	int tbl_ram[]={1,1,1,4,16,8};
-
-	s.process(&m_rom->get_info()->gb_type, sizeof(int));
-	bool gbc = m_rom->get_info()->gb_type >= 3; // GB: 1, SGB: 2, GBC: 3...
-
-	int cpu_dat[16];
-
-	if(gbc) {
-		s.process(m_cpu->get_ram(), 0x2000*4);
-		s.process(m_cpu->get_vram(), 0x2000*2);
-	} else {
-		s.process(m_cpu->get_ram(), 0x2000);
-		s.process(m_cpu->get_vram(), 0x2000);
-	}
-	s.process(m_rom->get_sram(), tbl_ram[m_rom->get_info()->ram_size]*0x2000);
-	s.process(m_cpu->get_oam(), 0xA0);
-	s.process(m_cpu->get_stack(), 0x80);
-
-	int rom_page = (m_mbc->get_rom() - m_rom->get_rom()) / 0x4000;
-	int ram_page = (m_mbc->get_sram() - m_rom->get_sram()) / 0x2000;
-	s.process(&rom_page, sizeof(int)); // rom_page
-	s.process(&ram_page, sizeof(int)); // ram_page
-	m_mbc->set_page(rom_page, ram_page); // hackish, but should work.
-	// basically, if we're serializing to count or save, the set_page
-	// should have no effect assuming the calculations above are correct.
-	// tl;dr: "if it's good enough for saving, it's good enough for loading"
-
-	if(true || gbc) { // why not for normal gb as well?
-		m_cpu->save_state(cpu_dat);
-		m_cpu->save_state_ex(cpu_dat+8);
-		s.process(cpu_dat, 12*sizeof(int));
-		m_cpu->restore_state(cpu_dat);      // same errata as above
-		m_cpu->restore_state_ex(cpu_dat+8);
-	}
-
-	s.process(m_cpu->get_regs(), sizeof(cpu_regs)); // cpu_reg
-	s.process(&regs, sizeof(gb_regs)); //sys_reg
-
-	if(gbc) {
-		s.process(&c_regs, sizeof(gbc_regs)); //col_reg
-		s.process(m_lcd->get_pal(0), sizeof(word)*8*4*2); //palette
-	}
-
-	s.process(m_cpu->get_halt(), sizeof(bool));
-
-	int mbc_dat = m_mbc->get_state();
-	s.process(&mbc_dat, sizeof(int)); //MBC
-	m_mbc->set_state(mbc_dat);
-
-	bool ext_is = m_mbc->is_ext_ram();
-	s.process(&ext_is, sizeof(bool));
-	m_mbc->set_ext_is(ext_is);
-
-	// Added ver 1.1
-	s.process(m_apu->get_stat(), sizeof(apu_stat));
-	s.process(m_apu->get_mem(), 0x30);
-	s.process(m_apu->get_stat_cpy(), sizeof(apu_stat));
 }
 
 void gb::serialize(serializer &s)
@@ -363,7 +215,7 @@ void gb::run()
 						if (m_cpu->dma_src<0x4000)
 							m_cpu->dma_src_bank=m_rom->get_rom();
 						else if (m_cpu->dma_src<0x8000)
-							m_cpu->dma_src_bank=m_mbc->get_rom();
+							m_cpu->dma_src_bank=m_mbc->get_rom()-0x4000;
 						else if (m_cpu->dma_src>=0xA000&&m_cpu->dma_src<0xC000)
 							m_cpu->dma_src_bank=m_mbc->get_sram()-0xA000;
 						else if (m_cpu->dma_src>=0xC000&&m_cpu->dma_src<0xD000)

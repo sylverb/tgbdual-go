@@ -72,8 +72,13 @@ void apu::write(word adr,byte dat,int clock)
 	snd->write_que[snd->que_count].dat=dat;
 	snd->write_que[snd->que_count++].clock=clock;
 
+#ifndef TARGET_GNW
 	if (snd->que_count>=0x10000)
 		snd->que_count=0xffff;
+#else
+	if (snd->que_count>=0x100)
+		snd->que_count=0xff;
+#endif
 
 	snd->process(adr,dat);
 
@@ -576,11 +581,19 @@ void apu_snd::render(short *buf,int sample)
 	for (int i=0;i<sample;i++){
 		now_time=bef_clock+(now_clock-bef_clock)*i/sample;
 
+#ifndef TARGET_GNW
 		if ((cur!=0x10000)&&(now_time>write_que[cur].clock)&&(que_count)){
+#else
+		if ((cur!=0x100)&&(now_time>write_que[cur].clock)&&(que_count)){
+#endif
 			process(write_que[cur].adr,write_que[cur].dat);
 			cur++;
 			if (cur>=que_count)
+#ifndef TARGET_GNW
 				cur=0x10000;
+#else
+				cur=0x100;
+#endif
 		}
 
 		tmp_l=tmp_r=0;

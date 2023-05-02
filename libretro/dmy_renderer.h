@@ -31,7 +31,6 @@ public:
 
 	virtual void render_screen(byte *buf,int width,int height,int depth);
 	virtual word map_color(word gb_col);
-	virtual word unmap_color(word gb_col);
 	virtual int check_pad();
 	virtual void refresh();
 	virtual byte get_time(int type);

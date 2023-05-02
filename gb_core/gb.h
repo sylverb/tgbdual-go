@@ -32,6 +32,8 @@
 #define INT_SERIAL 8
 #define INT_PAD 16
 
+#define BANK_SIZE 0x4000
+
 class gb;
 class cpu;
 class lcd;
@@ -39,21 +41,29 @@ class apu;
 class apu_snd;
 class rom;
 class mbc;
+#if CHEAT_CODES == 1
 class cheat;
+#endif
 
 struct ext_hook{
 	byte (*send)(byte);
 	bool (*led)(void);
 };
 
+#if CHEAT_CODES == 1
 struct cheat_dat{
+#ifndef TARGET_GNW
 	bool enable;
+#endif
 	byte code;
-	word adr;
 	byte dat;
+	word adr;
+#ifndef TARGET_GNW
 	char name[255];
+#endif
 	cheat_dat *next;
 };
+#endif
 
 struct gb_regs {
 	byte P1,SB,SC,DIV,TIMA,TMA,TAC,IF,LCDC,STAT,SCY,SCX,LY,LYC,DMA,BGP,OBP1,OBP2,WY,WX,IE;
@@ -157,6 +167,7 @@ struct rom_info {
 	int cart_type;
 	byte rom_size;
 	byte ram_size;
+	size_t rom_file_size;
 
 	bool check_sum;
 	int gb_type;
@@ -175,7 +186,9 @@ public:
 	rom *get_rom() { return m_rom; }
 	mbc *get_mbc() { return m_mbc; }
 	renderer *get_renderer() { return m_renderer; }
+#if CHEAT_CODES == 1
 	cheat *get_cheat() { return m_cheat; }
+#endif
 	gb *get_target() { return target; }
 	gb_regs *get_regs() { return &regs; }
 	gbc_regs *get_cregs() { return &c_regs; }
@@ -187,8 +200,6 @@ public:
 	bool load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent);
 
 	void serialize(serializer &s);
-	void serialize_firstrev(serializer &s);
-	void serialize_legacy(serializer &s);
 
 	size_t get_state_size(void);
 	void save_state_mem(void *buf);
@@ -209,7 +220,9 @@ private:
 	mbc *m_mbc;
 	renderer *m_renderer;
 
+#if CHEAT_CODES == 1
 	cheat *m_cheat;
+#endif
 
 	gb *target;
 
@@ -229,6 +242,7 @@ private:
 	bool use_gba;
 };
 
+#if CHEAT_CODES == 1
 class cheat
 {
 public:
@@ -239,26 +253,39 @@ public:
 	void cheat_write(word adr,byte dat);
 
 	bool cheak_cheat(word adr);
+#ifndef TARGET_GNW
 	void create_cheat_map();
+#else
+	bool has_cheat(word adr);
+#endif
 
 	void add_cheat(cheat_dat *dat);
+#ifndef TARGET_GNW
 	void delete_cheat(char *name);
 	std::list<cheat_dat>::iterator find_cheat(char *name);
 	void create_unique_name(char *buf);
+#endif
 
 	void clear();
 
 	std::list<cheat_dat>::iterator get_first() { return cheat_list.begin(); }
 	std::list<cheat_dat>::iterator get_end() { return cheat_list.end(); }
 
+#ifndef TARGET_GNW
 	int *get_cheat_map() { return cheat_map; }
+#endif
 
 private:
 	std::list<cheat_dat> cheat_list;
+#ifndef TARGET_GNW
 	int cheat_map[0x10000];
-
+#else
+	word upper_adr;
+	word lower_adr;
+#endif
 	gb *ref_gb;
 };
+#endif
 
 class lcd
 {
@@ -272,6 +299,9 @@ public:
 	word *get_pal(int num) { return col_pal[num]; }
 	word *get_mapped_pal(int num) { return mapped_pal[num]; }
 
+	char get_palette_count();
+	char get_current_palette();
+	void set_palette(char index);
 	void set_enable(int layer,bool enable);
 	bool get_enable(int layer);
 
@@ -286,8 +316,8 @@ private:
 	void win_render_color(void *buf,int scanline);
 	void sprite_render_color(void *buf,int scanline);
 
+	char cur_palette;
 	word m_pal16[4];
-	dword m_pal32[4];
 	word col_pal[16][4];
 	word mapped_pal[16][4];
 
@@ -356,7 +386,11 @@ private:
 
 	apu_stat stat;
 	apu_stat stat_cpy,stat_tmp;
+#ifndef TARGET_GNW
 	apu_que write_que[0x10000];
+#else
+	apu_que write_que[0x100];
+#endif
 	int que_count;
 	int bef_clock;
 	apu *ref_apu;
@@ -374,14 +408,19 @@ public:
 	mbc(gb *ref);
 	~mbc();
 
+	byte *get_rom_bank0() { return rom_bank0; }
 	byte *get_rom() { return rom_page; }
 	byte *get_sram() { return sram_page; }
+	int  get_bank() { return current_bank; }
 	bool is_ext_ram() { return ext_is_ram; }
 	void set_ext_is(bool ext) { ext_is_ram=ext; }
 
 	int get_state();
 	void set_state(int dat);
 	void set_page(int rom,int sram);
+	void set_bank(int bank);
+	void gb_rom_compress_load();
+	void rom_loadbank_cache(short bank);
 
 	byte read(word adr);
 	void write(word adr,byte dat);
@@ -401,9 +440,10 @@ private:
 	void tama5_write(word adr,byte dat);
 	void mmm01_write(word adr,byte dat);
 
+	byte *rom_bank0;
 	byte *rom_page;
 	byte *sram_page;
-
+	int  current_bank;
 	bool mbc1_16_8;
 	byte mbc1_dat;
 
@@ -452,7 +492,7 @@ public:
 	bool has_battery();
 	int get_sram_size(); // byte単位
 
-	void set_first(int page) { first_page=dat+0x4000*page; }
+	void set_first(int page) { first_page=dat+BANK_SIZE*page; }
 
 	bool load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent);
 
@@ -466,7 +506,9 @@ private:
 	byte *first_page;
 
 	bool b_loaded;
-   bool b_persistent;
+#ifndef TARGET_GNW
+	bool b_persistent;
+#endif
 };
 
 class cpu
@@ -475,8 +517,17 @@ friend class gb;
 public:
 	cpu(gb *ref);
 	~cpu();
-
-	byte read(word adr) { return (ref_gb->get_cheat()->get_cheat_map()[adr])?ref_gb->get_cheat()->cheat_read(adr):read_direct(adr); }
+#ifdef TARGET_GNW
+	void init_ram();
+#endif
+	byte read(word adr) {
+#if CHEAT_CODES == 1
+		return (ref_gb->get_cheat()->has_cheat(adr))?ref_gb->get_cheat()->cheat_read(adr):read_direct(adr);
+//		return (ref_gb->get_cheat()->get_cheat_map()[adr])?ref_gb->get_cheat()->cheat_read(adr):read_direct(adr);
+#else
+		return read_direct(adr);
+#endif
+		}
 
 	byte read_direct(word adr);
 	void write(word adr,byte dat);
@@ -523,8 +574,13 @@ private:
 	gb *ref_gb;
 	cpu_regs regs;
 
+#ifndef TARGET_GNW
 	byte ram[0x2000*4];
 	byte vram[0x2000*2];
+#else
+	byte *ram;
+	byte *vram;
+#endif
 	byte stack[0x80];
 	byte oam[0xA0];
 	byte spare_oam[0x18];

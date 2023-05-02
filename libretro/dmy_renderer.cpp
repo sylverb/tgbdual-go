@@ -83,27 +83,6 @@ word dmy_renderer::map_color(word gb_col)
 #endif
 }
 
-word dmy_renderer::unmap_color(word gb_col)
-{
-#ifndef SKIP_COLOR_CORRECTION
-#ifndef FRONTEND_SUPPORTS_RGB565
-   if(rgb565)
-   {
-#endif
-      return ((gb_col&0x001f) << 10) |
-         ((gb_col&0x07c0) >>  1) |
-         ((gb_col&0xf800) >> 11);
-#ifndef FRONTEND_SUPPORTS_RGB565
-   }
-   return ((gb_col&0x001f) << 10) |
-      ((gb_col&0x03e0)      ) |
-      ((gb_col&0x7c00) >> 10);
-#endif
-#else
-   return gb_col;
-#endif
-}
-
 void dmy_renderer::refresh() {
    static int16_t stream[SAMPLES_PER_FRAME*2];
 
