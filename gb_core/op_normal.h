@@ -81,7 +81,7 @@ case 0x3A: REG_A=read(REG_HL);REG_HL--;break; // LD A,(HLD) : 00 111 010 :state 
 //0x32 LD (mn),A -> LD (HLD),A Save A at (HL) and decrement HL
 case 0x32: write(REG_HL,REG_A);REG_HL--;break; // LD (HLD),A : 00 110 010 :state 13
 
-case 0xD9: /*Log("Return Interrupts.\n");*/regs.I=1;REG_PC=readw(REG_SP);REG_SP+=2;int_desable=true;/*;ref_gb->get_regs()->IF=0*/;/*res->system_reg.IF&=~Int_hist[(Int_depth>0)?--Int_depth:Int_depth]*//*Int_depth=((Int_depth>0)?--Int_depth:Int_depth);*//*res->system_reg.IF=0;*//*Log("RETI %d\n",Int_depth);*/break;//RETI state 16
+case 0xD9: /*Log("Return Interrupts.\n");*/regs.I=1;REG_PC=readw(REG_SP);REG_SP+=2;int_disable=true;/*;ref_gb->get_regs()->IF=0*/;/*res->system_reg.IF&=~Int_hist[(Int_depth>0)?--Int_depth:Int_depth]*//*Int_depth=((Int_depth>0)?--Int_depth:Int_depth);*//*res->system_reg.IF=0;*//*Log("RETI %d\n",Int_depth);*/break;//RETI state 16
 case 0xE0: write(0xFF00+op_read(),REG_A);break;//LDH (n),A
 case 0xE2: write(0xFF00+REG_C,REG_A);break;//LDH (C),A
 case 0xE8: REG_SP+=(signed char)op_read();break;//ADD SP,n
@@ -408,8 +408,8 @@ case 0x37: //SCF(set carry) :state 4
 	break;
 
 case 0x00: break; //NOP : state 4
-case 0xF3: regs.I=0;break; //DI : state 4
-case 0xFB: regs.I=1;int_desable=true;break; //EI : state 4
+case 0xF3: regs.I=0;int_disable=false;break; //DI : state 4
+case 0xFB: regs.I=1;int_disable=true;break; //EI : state 4
 
 case 0x76:
 #ifndef EXSACT_CORE

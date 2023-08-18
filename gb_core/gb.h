@@ -603,7 +603,7 @@ private:
 	bool b_dma_first;
 
 	int last_int;
-	bool int_desable;
+	bool int_disable;
 
 	byte *dma_src_bank;
 	byte *dma_dest_bank;

@@ -105,7 +105,7 @@ void cpu::reset()
 	gdma_rest=0;
 
 	last_int=0;
-	int_desable=false;
+	int_disable=false;
 
 	if (ram != NULL) {
 		if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
@@ -906,8 +906,8 @@ void cpu::irq(int irq_type)
 
 void cpu::irq_process()
 {
-	if (int_desable){
-		int_desable=false;
+	if (int_disable){
+		int_disable=false;
 		return;
 	}
 
