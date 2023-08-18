@@ -674,7 +674,7 @@ static int ram_size_tbl[]={0,1,1,4,16,8};
 void mbc::mbc1_write(word adr,byte dat)
 {
 	if (mbc1_16_8){//16/8モード
-		switch(adr>>13){
+		switch(adr >> 13 & 3){
 		case 0:
 			break;
 		case 1:
