@@ -52,8 +52,8 @@ static bool rom_bank_cache_enabled;
 static compression_t rom_comp_type;
 
 /* SRAM memory :  ROM bank cache */
-//unsigned char GB_ROM_SRAM_CACHE[BANK_SIZE*_MAX_GB_ROM_BANK_IN_CACHE];
-unsigned char *GB_ROM_SRAM_CACHE;
+//unsigned char TGB_ROM_SRAM_CACHE[BANK_SIZE*_MAX_GB_ROM_BANK_IN_CACHE];
+static unsigned char *TGB_ROM_SRAM_CACHE;
 
 /*Compressed ROM */
 static const unsigned char *GB_ROM_COMP;
@@ -614,7 +614,7 @@ void mbc::rom_loadbank_cache(short bank)
 				size_t n_decomp_bytes;
 				
                 n_decomp_bytes = lzma_inflate(
-                        &GB_ROM_SRAM_CACHE[OFFSET],
+                        &TGB_ROM_SRAM_CACHE[OFFSET],
                         BANK_SIZE ,
                         ref_gb->get_rom()->get_rom()+gb_rom_comp_bank_offset[bank],
                         rom_size - gb_rom_comp_bank_offset[bank]
@@ -625,7 +625,7 @@ void mbc::rom_loadbank_cache(short bank)
         }
 
 		/* set the bank address to the right bank address in cache */
-		romcache.bank[bank] = (unsigned char *)&GB_ROM_SRAM_CACHE[OFFSET];
+		romcache.bank[bank] = (unsigned char *)&TGB_ROM_SRAM_CACHE[OFFSET];
 
 		/* refresh timestamp and score*/
 		cache_ts[reclaimed_idx] = HAL_GetTick();
@@ -640,7 +640,7 @@ void mbc::rom_loadbank_cache(short bank)
 		OFFSET = active_idx * BANK_SIZE;
 
 		/* set the bank address to the right bank address in cache */
-		romcache.bank[bank] = (unsigned char *)&GB_ROM_SRAM_CACHE[OFFSET];
+		romcache.bank[bank] = (unsigned char *)&TGB_ROM_SRAM_CACHE[OFFSET];
 
 		/* refresh timestamp and score */
 		cache_ts[active_idx] = HAL_GetTick();
@@ -992,12 +992,12 @@ void mbc::gb_rom_compress_load(){
     size_t available_size = bank_cache_size * BANK_SIZE;
     GB_ROM_COMP        = (unsigned char *)src;
 #ifndef LINUX_EMU
-    GB_ROM_SRAM_CACHE = (unsigned char *)heap_alloc_mem(available_size);
+    TGB_ROM_SRAM_CACHE = (unsigned char *)heap_alloc_mem(available_size);
 #else
-    GB_ROM_SRAM_CACHE = (unsigned char *)itc_malloc(available_size);
+    TGB_ROM_SRAM_CACHE = (unsigned char *)itc_malloc(available_size);
 #endif
     /* dest pointer to the ROM data in the internal RAM (raw) */
-    unsigned char *dest = (unsigned char *)GB_ROM_SRAM_CACHE;
+    unsigned char *dest = (unsigned char *)TGB_ROM_SRAM_CACHE;
 
 	size_t rom_size = ref_gb->get_rom()->get_info()->rom_file_size;
     printf("Compressed ROM detected #%d\n", rom_size);
@@ -1041,7 +1041,7 @@ void mbc::gb_rom_compress_load(){
                 gb_rom_comp_bank_offset[bank_idx] = src_offset;
 
                 res = LzmaDecode(
-                    &GB_ROM_SRAM_CACHE[0], &dst_buf_size,
+                    &TGB_ROM_SRAM_CACHE[0], &dst_buf_size,
                     &GB_ROM_COMP[src_offset], &src_buf_size,
                     lzma_prop_data, 5,
                     LZMA_FINISH_ANY, &status,
