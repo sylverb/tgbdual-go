@@ -1001,7 +1001,7 @@ void mbc::gb_rom_compress_load(){
 
 	size_t rom_size = ref_gb->get_rom()->get_info()->rom_file_size;
     printf("Compressed ROM detected #%d\n", rom_size);
-    printf("Uncompressing to %p. %ld bytes available.\n", dest, available_size);
+    printf("Uncompressing to %p. %d bytes available.\n", dest, available_size);
 
 
     if (bank_cache_size > _MAX_GB_ROM_BANK_IN_CACHE) bank_cache_size = _MAX_GB_ROM_BANK_IN_CACHE;
