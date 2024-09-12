@@ -420,7 +420,6 @@ public:
 	void set_page(int rom,int sram);
 	void set_bank(int bank);
 	void gb_rom_compress_load();
-	void rom_loadbank_cache(short bank);
 
 	byte read(word adr);
 	void write(word adr,byte dat);
