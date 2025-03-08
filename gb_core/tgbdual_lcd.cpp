@@ -24,6 +24,7 @@
 #include "gb.h"
 
 static word dmg_palettes[][4] = {
+	{ 0xE7DA, 0x8E0E, 0x3B4B, 0x08C4 }, // GB_G&W-OFW_PALETTE
  	{ 0x7FFF, 0x56B5, 0x4631, 0x0000 }, // GB_TGBDUAL_PALETTE
  	{ 0x7FFF, 0x5AD6, 0x318C, 0x0000 }, // GB_2BGRAYS_PALETTE
  	{ 0x0272, 0x0DCA, 0x0D45, 0x0102 }, // GB_DMGREEN_PALETTE
@@ -70,7 +71,11 @@ void lcd::set_palette(char index)
 {
 	cur_palette = index;
 	for (int i=0;i<4;i++){
+#ifndef TARGET_GNW
 		m_pal16[i]=ref_gb->get_renderer()->map_color(dmg_palettes[index][i]);
+#else
+		m_pal16[i]=dmg_palettes[index][i];
+#endif
 	}
 }
 
@@ -110,7 +115,11 @@ void lcd::bg_render(void *buf,int scanline)
 		if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x01))
 		{
 			word *tmp_w=(word*)buf+160*scanline;
-			word tmp_dat=ref_gb->get_renderer()->map_color(0x7fff);
+#ifndef TARGET_GNW
+			word tmp_dat=ref_gb->get_renderer()->map_color(m_pal16[0]);
+#else
+			word tmp_dat=m_pal16[0];
+#endif
 			for (int t=0;t<160;t++)
 				*(tmp_w++)=tmp_dat;
 		}
@@ -423,7 +432,11 @@ void lcd::bg_render_color(void *buf,int scanline)
 		(ref_gb->get_regs()->WY<=(dword)scanline&&ref_gb->get_regs()->WX<8&&(ref_gb->get_regs()->LCDC&0x20))){
 		if (!(ref_gb->get_regs()->LCDC&0x80)/*||!(ref_gb->get_regs()->LCDC&0x01)*/){
 			word *tmp_w=(word*)buf+160*scanline;
-			word tmp_dat=ref_gb->get_renderer()->map_color(0x7fff);
+#ifndef TARGET_GNW
+			word tmp_dat=ref_gb->get_renderer()->map_color(m_pal16[0]);
+#else
+			word tmp_dat=m_pal16[0];
+#endif
 			for (int t=0;t<160;t++)
 				*(tmp_w++)=tmp_dat;
 //			memset(()+160*scanline,0xff,160*2);

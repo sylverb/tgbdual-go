@@ -155,7 +155,11 @@ void gb::restore_state_mem(void *buf)
 void gb::refresh_pal()
 {
 	for (int i=0;i<64;i++)
+#ifndef TARGET_GNW
 		m_lcd->get_mapped_pal(i>>2)[i&3]=m_renderer->map_color(m_lcd->get_pal(i>>2)[i&3]);
+#else
+		m_lcd->get_mapped_pal(i>>2)[i&3]=m_lcd->get_pal(i>>2)[i&3];
+#endif
 }
 
 void gb::run()

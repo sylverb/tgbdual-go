@@ -41,7 +41,9 @@ public:
 	virtual void refresh()=0;
 	virtual void render_screen(byte *buf,int width,int height,int depth)=0;
 	virtual int check_pad()=0;
+#ifndef TARGET_GNW
 	virtual word map_color(word gb_col)=0;
+#endif
 
 	virtual byte get_time(int type)=0;
 	virtual void set_time(int type,byte dat)=0;

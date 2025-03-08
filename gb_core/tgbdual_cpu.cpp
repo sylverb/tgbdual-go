@@ -63,21 +63,11 @@ void cpu::init_ram()
 	heap_itc_alloc(true);
 #endif
 	if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
-#ifndef LINUX_EMU
 		ram = (byte *)heap_alloc_mem(0x2000*4);
 		vram = (byte *)heap_alloc_mem(0x2000*2);
-#else
-		ram = (byte *)itc_calloc(1,0x2000*4);
-		vram = (byte *)itc_calloc(1,0x2000*2);
-#endif
 	} else {
-#ifndef LINUX_EMU
 		ram = (byte *)heap_alloc_mem(0x2000);
 		vram = (byte *)heap_alloc_mem(0x2000);
-#else
-		ram = (byte *)itc_calloc(1,0x2000);
-		vram = (byte *)itc_calloc(1,0x2000);
-#endif
 	}
 	vram_bank=vram;
 	ram_bank=ram+0x1000;
@@ -671,8 +661,13 @@ void cpu::io_write(word adr,byte dat)
 				ref_gb->get_lcd()->get_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3]=
 				(ref_gb->get_lcd()->get_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3]&0xff00)|dat;
 			}
+#ifndef TARGET_GNW
 			ref_gb->get_lcd()->get_mapped_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3]=
 				ref_gb->get_renderer()->map_color(ref_gb->get_lcd()->get_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3]);
+#else
+			ref_gb->get_lcd()->get_mapped_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3]=
+				ref_gb->get_lcd()->get_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3];
+#endif
 /*			if (ref_gb->get_cregs()->BCPS&1){
 				ref_gb->get_lcd()->get_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3]=
 					ref_gb->get_renderer()->map_color(((ref_gb->get_renderer()->unmap_color(ref_gb->get_lcd()->get_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3])&0xff)|(dat<<8)));
@@ -698,8 +693,13 @@ void cpu::io_write(word adr,byte dat)
 				ref_gb->get_lcd()->get_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3]=
 				(ref_gb->get_lcd()->get_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3]&0xff00)|dat;
 			}
+#ifndef TARGET_GNW
 			ref_gb->get_lcd()->get_mapped_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3]=
 				ref_gb->get_renderer()->map_color(ref_gb->get_lcd()->get_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3]);
+#else
+			ref_gb->get_lcd()->get_mapped_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3]=
+				ref_gb->get_lcd()->get_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3];
+#endif
 /*			if (ref_gb->get_cregs()->OCPS&1){
 				ref_gb->get_lcd()->get_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3]=
 					ref_gb->get_renderer()->map_color(((ref_gb->get_renderer()->unmap_color(ref_gb->get_lcd()->get_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3])&0xff)|(dat<<8)));
