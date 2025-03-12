@@ -661,13 +661,8 @@ void cpu::io_write(word adr,byte dat)
 				ref_gb->get_lcd()->get_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3]=
 				(ref_gb->get_lcd()->get_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3]&0xff00)|dat;
 			}
-#ifndef TARGET_GNW
 			ref_gb->get_lcd()->get_mapped_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3]=
 				ref_gb->get_renderer()->map_color(ref_gb->get_lcd()->get_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3]);
-#else
-			ref_gb->get_lcd()->get_mapped_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3]=
-				ref_gb->get_lcd()->get_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3];
-#endif
 /*			if (ref_gb->get_cregs()->BCPS&1){
 				ref_gb->get_lcd()->get_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3]=
 					ref_gb->get_renderer()->map_color(((ref_gb->get_renderer()->unmap_color(ref_gb->get_lcd()->get_pal((ref_gb->get_cregs()->BCPS>>3)&7)[(ref_gb->get_cregs()->BCPS>>1)&3])&0xff)|(dat<<8)));
@@ -693,13 +688,8 @@ void cpu::io_write(word adr,byte dat)
 				ref_gb->get_lcd()->get_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3]=
 				(ref_gb->get_lcd()->get_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3]&0xff00)|dat;
 			}
-#ifndef TARGET_GNW
 			ref_gb->get_lcd()->get_mapped_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3]=
 				ref_gb->get_renderer()->map_color(ref_gb->get_lcd()->get_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3]);
-#else
-			ref_gb->get_lcd()->get_mapped_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3]=
-				ref_gb->get_lcd()->get_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3];
-#endif
 /*			if (ref_gb->get_cregs()->OCPS&1){
 				ref_gb->get_lcd()->get_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3]=
 					ref_gb->get_renderer()->map_color(((ref_gb->get_renderer()->unmap_color(ref_gb->get_lcd()->get_pal(((ref_gb->get_cregs()->OCPS>>3)&7)+8)[(ref_gb->get_cregs()->OCPS>>1)&3])&0xff)|(dat<<8)));
