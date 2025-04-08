@@ -25,9 +25,7 @@
 #include <string.h>
 #ifdef TARGET_GNW
 #include "gw_malloc.h"
-#ifndef LINUX_EMU
 #include "heap.hpp"
-#endif
 #endif
 
 #define Z_FLAG 0x40
@@ -59,9 +57,8 @@ cpu::~cpu()
 #ifdef TARGET_GNW
 void cpu::init_ram()
 {
-#ifndef LINUX_EMU
 	heap_itc_alloc(true);
-#endif
+
 	if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
 		ram = (byte *)heap_alloc_mem(0x2000*4);
 		vram = (byte *)heap_alloc_mem(0x2000*2);
@@ -542,8 +539,6 @@ void cpu::io_write(word adr,byte dat)
 			speed_change=dat&1;
 			return;
 		case 0xFF4F://VBK(内部VRAMバンク切り替え) // VBK (VRAM internal bank switching)
-			if (dma_executing)
-				return;
 			vram_bank=vram+0x2000*(dat&0x01);
 			ref_gb->get_cregs()->VBK=dat;//&0x01;
 			return;
