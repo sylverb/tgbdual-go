@@ -40,6 +40,7 @@ static word dmg_palettes[][4] = {
  	{ 0x4294, 0x3610, 0x1D4A, 0x0883 }, // GB_NSWITC2_PALETTE
  	{ 0x3E75, 0x3211, 0x1D4B, 0x0884 }, // GB_NSWITC3_PALETTE
  	{ 0x2E54, 0x21F0, 0x154B, 0x0885 }  // GB_NSWITC4_PALETTE
+    { 0x0000, 0x3220, 0x037F, 0x7FFF }, // GB_NEGATIV_PALETTE
  };
 
 #define ROL_BYTE(var, bits) (var = ((var) & (-1U << 8)) \
