@@ -302,6 +302,7 @@ public:
 	char get_palette_count();
 	char get_current_palette();
 	void set_palette(char index);
+	word get_blank_color();
 	void set_enable(int layer,bool enable);
 	bool get_enable(int layer);
 

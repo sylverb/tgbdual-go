@@ -284,7 +284,10 @@ void gb::run()
 //			regs.LY=(regs.LY+1)%154;
 			re_render++;
 			if (re_render>=154){
-				memset(vframe,0xff,160*144*2); // TODO: change to color palette
+				word blank=m_lcd->get_blank_color();
+				word *dst=vframe;
+				for (int i=160*144;i>0;i--)
+					*(dst++)=blank;
 				m_renderer->refresh();
 				if (now_frame>=skip){
 					m_renderer->render_screen((byte*)vframe,160,144,16);

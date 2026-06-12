@@ -75,6 +75,13 @@ void lcd::set_palette(char index)
 	}
 }
 
+word lcd::get_blank_color()
+{
+	if (ref_gb->get_rom()->get_info()->gb_type >= 3)
+		return mapped_pal[0][0];
+	return m_pal16[ref_gb->get_regs()->BGP & 0x3];
+}
+
 void lcd::set_enable(int layer,bool enable)
 {
 	layer_enable[layer]=enable;
@@ -111,7 +118,7 @@ void lcd::bg_render(void *buf,int scanline)
 		if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x01))
 		{
 			word *tmp_w=(word*)buf+160*scanline;
-			word tmp_dat=ref_gb->get_renderer()->map_color(m_pal16[0]);
+			word tmp_dat=get_blank_color();
 			for (int t=0;t<160;t++)
 				*(tmp_w++)=tmp_dat;
 		}
@@ -424,10 +431,9 @@ void lcd::bg_render_color(void *buf,int scanline)
 		(ref_gb->get_regs()->WY<=(dword)scanline&&ref_gb->get_regs()->WX<8&&(ref_gb->get_regs()->LCDC&0x20))){
 		if (!(ref_gb->get_regs()->LCDC&0x80)/*||!(ref_gb->get_regs()->LCDC&0x01)*/){
 			word *tmp_w=(word*)buf+160*scanline;
-			word tmp_dat=ref_gb->get_renderer()->map_color(m_pal16[0]);
+			word tmp_dat=get_blank_color();
 			for (int t=0;t<160;t++)
 				*(tmp_w++)=tmp_dat;
-//			memset(()+160*scanline,0xff,160*2);
 		}
 		return;
 	}
@@ -789,7 +795,10 @@ void lcd::render(void *buf,int scanline)
 			sprite_render_color(buf,scanline);
 		}
 		else{
-			memset(((word*)buf)+160*scanline,0x00,160*2);
+			word *line=((word*)buf)+160*scanline;
+			word blank=get_blank_color();
+			for (int t=0;t<160;t++)
+				line[t]=blank;
 			if (layer_enable[0])
 				bg_render_color(buf,scanline);
 			if (layer_enable[1])
@@ -805,7 +814,10 @@ void lcd::render(void *buf,int scanline)
 			sprite_render(buf,scanline);
 		}
 		else{
-			memset(((word*)buf)+160*scanline,0x00,160*2);
+			word *line=((word*)buf)+160*scanline;
+			word blank=get_blank_color();
+			for (int t=0;t<160;t++)
+				line[t]=blank;
 			if (layer_enable[0])
 				bg_render(buf,scanline);
 			if (layer_enable[1])
