@@ -199,6 +199,9 @@ public:
 	void set_use_gba(bool use) { use_gba=use; }
 	bool load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent);
 
+	/* Evaluate STAT IRQ line (mode 0/1/2 + LYC OR'd). Rising edge => LCDC IF. */
+	void update_stat_irq();
+
 	void serialize(serializer &s);
 
 	size_t get_state_size(void);
@@ -240,6 +243,9 @@ private:
 
 	bool hook_ext;
 	bool use_gba;
+
+	/* STAT IRQ line (OR of enabled mode/LYC sources). Rising edge => INT_LCDC. */
+	bool stat_irq_line;
 };
 
 #if CHEAT_CODES == 1
@@ -538,6 +544,7 @@ public:
 	byte seri_send(byte dat);
 	void irq(int irq_type);
 	void inline irq_process();
+	void do_hdma_chunk();
 	void reset();
 	void set_trace(bool trace) { b_trace=trace; }
 
@@ -595,6 +602,7 @@ private:
 //	word org_pal[16][4];
 	int total_clock,rest_clock,sys_clock,seri_occer,div_clock;
 	bool halt,speed,speed_change,dma_executing;
+	bool halt_bug; /* DMG: next opcode byte fetched twice after HALT with IME=0 + pending IRQ */
 	bool b_trace;
 	int dma_src;
 	int dma_dest;

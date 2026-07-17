@@ -412,41 +412,21 @@ case 0xF3: regs.I=0;int_disable=false;break; //DI : state 4
 case 0xFB: regs.I=1;int_disable=true;break; //EI : state 4
 
 case 0x76:
-#ifndef EXSACT_CORE
-	if (ref_gb->get_regs()->TAC&0x04){//タイマ割りこみ
-		word tmp;
-		tmp=ref_gb->get_regs()->TIMA+(sys_clock+rest_clock)/timer_clocks[ref_gb->get_regs()->TAC&0x03];
-
-		if (tmp&0xFF00){//HALT中に割りこみがかかる場合
-			total_clock+=(256-ref_gb->get_regs()->TIMA)*timer_clocks[ref_gb->get_regs()->TAC&0x03]-sys_clock;
-			rest_clock-=(256-ref_gb->get_regs()->TIMA)*timer_clocks[ref_gb->get_regs()->TAC&0x03]-sys_clock;
-			ref_gb->get_regs()->TIMA=ref_gb->get_regs()->TMA;
-			halt=true;
-			REG_PC--;
-			irq(INT_TIMER);
-			sys_clock=(sys_clock+rest_clock)&(timer_clocks[ref_gb->get_regs()->TAC&0x03]-1);
+	/* Align with gambatte: HALT with IME=0 and a pending IRQ must NOT
+	 * enter halt (and on DMG triggers the halt bug). Otherwise sleep
+	 * until an enabled IRQ is pending; irq_process wakes without
+	 * servicing when IME is still clear. */
+	{
+		byte pending=(ref_gb->get_regs()->IF&ref_gb->get_regs()->IE)&0x1F;
+		if (!regs.I&&pending){
+			if (ref_gb->get_rom()->get_info()->gb_type<3)
+				halt_bug=true;
 		}
 		else{
-			ref_gb->get_regs()->TIMA=tmp&0xFF;
-			sys_clock=(sys_clock+rest_clock)&(timer_clocks[ref_gb->get_regs()->TAC&0x03]-1);
 			halt=true;
-			total_clock+=rest_clock;
-			rest_clock=0;
 			REG_PC--;
 		}
 	}
-	else{
-		halt=true;
-		total_clock+=rest_clock;
-		div_clock+=rest_clock;
-		rest_clock=0;
-		REG_PC--;
-	}
-	tmp_clocks=0;
-#else
-	halt=true;
-	REG_PC--;
-#endif
 	break; //HALT : state 4
 
 //rotate/shift opcode

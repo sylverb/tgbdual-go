@@ -85,6 +85,7 @@ void cpu::reset()
 	total_clock=sys_clock=div_clock=0;
 	seri_occer=0x7fffffff;
 	halt=false;
+	halt_bug=false;
 	speed=false;
 	speed_change=false;
 	dma_executing=false;
@@ -436,7 +437,11 @@ void cpu::io_write(word adr,byte dat)
 			}
 			return;
 		case 0xFF04://DIV(ディバイダー) // DIV (divider)
+			/* Writing DIV resets the internal divider; also reset the
+			 * timer sub-counter (gambatte/DIV falling-edge related). */
 			ref_gb->get_regs()->DIV=0;
+			div_clock=0;
+			sys_clock=0;
 			return;
 		case 0xFF05://TIMA(タイマカウンタ) // TIMA (timer counter)
 			ref_gb->get_regs()->TIMA=dat;
@@ -463,14 +468,17 @@ void cpu::io_write(word adr,byte dat)
 //			fprintf(file,"LCDC=%02X at line %d\n",dat,ref_gb->get_regs()->LY);
 			return;
 		case 0xFF41://STAT(LCDステータス) // STAT (LCD status)
-			if (ref_gb->get_rom()->get_info()->gb_type==1)
-				// オリジナルGBにおいてこのような現象が起こるらしい
-				// This phenomenon seems to occur in the original GB
-				if (!(ref_gb->get_regs()->STAT&0x02))
-					ref_gb->get_regs()->IF|=INT_LCDC;
-
-			ref_gb->get_regs()->STAT=(ref_gb->get_regs()->STAT&0x7)|(dat&0x78);
+		{
+			byte old=ref_gb->get_regs()->STAT;
+			ref_gb->get_regs()->STAT=(old&0x07)|(dat&0x78);
+			/* DMG STAT write quirk: writing STAT can raise the STAT line
+			 * even when enabling a source that is already active. Force a
+			 * falling edge first so update_stat_irq sees a rise (Legend of Zerd). */
+			if (ref_gb->get_rom()->get_info()->gb_type<3)
+				ref_gb->stat_irq_line=false;
+			ref_gb->update_stat_irq();
 			return;
+		}
 		case 0xFF42://SCY(スクロールY) // SCY (scroll Y)
 			ref_gb->get_regs()->SCY=dat;
 			return;
@@ -483,6 +491,11 @@ void cpu::io_write(word adr,byte dat)
 			return;
 		case 0xFF45://LYC(LY比較) // LYC (compare LY)
 			ref_gb->get_regs()->LYC=dat;
+			if (ref_gb->get_regs()->LYC==ref_gb->get_regs()->LY)
+				ref_gb->get_regs()->STAT|=0x04;
+			else
+				ref_gb->get_regs()->STAT&=(byte)~0x04;
+			ref_gb->update_stat_irq();
 			return;
 		case 0xFF46://DMA(DMA転送) // DMA (DMA transfer)
 			switch(dat>>5){
@@ -515,6 +528,10 @@ void cpu::io_write(word adr,byte dat)
 				}
 				break;
 			}
+			/* OAM DMA does NOT stall the CPU (unlike HDMA/GDMA). The CPU
+			 * keeps running the usual HRAM wait loop; only OAM is busy.
+			 * Adding gdma_rest here stole ~640 cycles/frame and hung
+			 * Daedalian Opus after Start (VBlank OAM DMA every frame). */
 			return;
 		case 0xFF47://BGP(背景パレット) // BGP (background palette)
 			ref_gb->get_regs()->BGP=dat;
@@ -573,69 +590,41 @@ void cpu::io_write(word adr,byte dat)
 					ref_gb->get_cregs()->HDMA5=0xFF;
 					return;
 				}
-				dma_executing=true;
-				b_dma_first=true;
 				dma_rest=(dat&0x7F)+1;
 				ref_gb->get_cregs()->HDMA5=0;
-/*				dma_dest_bank=vram_bank;
-				if (dma_src<0x4000)
-					dma_src_bank=ref_gb->get_mbc()->get_rom_bank0();
-				else if (dma_src<0x8000)
-					dma_src_bank=ref_gb->get_mbc()->get_rom()-0x4000;
-				else if (dma_src>=0xA000&&dma_src<0xC000)
-					dma_src_bank=ref_gb->get_mbc()->get_sram()-0xA000;
-				else if (dma_src>=0xC000&&dma_src<0xD000)
-					dma_src_bank=ram-0xC000;
-				else if (dma_src>=0xD000&&dma_src<0xE000)
-					dma_src_bank=ram_bank-0xD000;
-				else dma_src_bank=NULL;
-*/			}
+				/* LCD off: HDMA behaves like GDMA (transfer all at once). */
+				if (!(ref_gb->get_regs()->LCDC&0x80)){
+					dma_executing=false;
+					while (dma_rest)
+						do_hdma_chunk();
+					ref_gb->get_cregs()->HDMA5=0xFF;
+					return;
+				}
+				dma_executing=true;
+				b_dma_first=true;
+				/* If already in HBlank/VBlank, transfer first chunk now
+				 * (gambatte / hardware: HDMA during Mode 0/1 fires immediately). */
+				{
+					byte mode=ref_gb->get_regs()->STAT&0x03;
+					if (mode==0||mode==1)
+						do_hdma_chunk();
+				}
+			}
 			else{ //通常DMA // Normal DMA
 				if (dma_executing){
+					/* Writing bit7=0 while HDMA active aborts (Pokemon Crystal). */
 					dma_executing=false;
 					dma_rest=0;
 					ref_gb->get_cregs()->HDMA5=0xFF;
-//					fprintf(file,"dma stopped\n");
 					return;
 				}
-				// どうやら､HBlank以外ならいつでもOKみたいだ
-				// Apparently, it seems OK except HBlank anytime
-//				if (!(((ref_gb->get_regs()->STAT&3)==1)||(!(ref_gb->get_regs()->LCDC&0x80)))){
-//					ref_gb->get_cregs()->HDMA5=0;
-//					return;
-//				}
 
 				dma_executing=false;
-				dma_rest=0;
+				dma_rest=(dat&0x7F)+1;
 				ref_gb->get_cregs()->HDMA5=0xFF;
-
-				switch(dma_src>>13){
-				case 0:
-				case 1:
-					memcpy(vram_bank+(dma_dest&0x1ff0),ref_gb->get_mbc()->get_rom_bank0()+(dma_src),16*(dat&0x7F)+16);
-					break;
-				case 2:
-				case 3:
-					memcpy(vram_bank+(dma_dest&0x1ff0),ref_gb->get_mbc()->get_rom()+(dma_src)-0x4000,16*(dat&0x7F)+16);
-					break;
-				case 4:
-					break;
-				case 5:
-					memcpy(vram_bank+(dma_dest&0x1ff0),ref_gb->get_mbc()->get_sram()+(dma_src&0x1FFF),16*(dat&0x7F)+16);
-					break;
-				case 6:
-					if (dma_src&0x1000)
-						memcpy(vram_bank+(dma_dest&0x1ff0),ram_bank+(dma_src&0x0FFF),16*(dat&0x7F)+16);
-					else
-						memcpy(vram_bank+(dma_dest&0x1ff0),ram+(dma_src&0x0FFF),16*(dat&0x7F)+16);
-					break;
-				case 7:
-					break;
-				}
-				dma_src+=((dat&0x7F)+1)*16;
-				dma_dest+=((dat&0x7F)+1)*16;
-
-				gdma_rest=456*2+((dat&0x7f)+1)*32*(speed?2:1); // CPU パワーを占領 // Occupied the CPU power
+				while (dma_rest)
+					do_hdma_chunk();
+				/* gdma_rest already accumulated by do_hdma_chunk */
 			}
 			return;
 		case 0xFF56://RP(赤外線) // RP (infrared)
@@ -896,40 +885,83 @@ void cpu::irq_process()
 		return;
 	}
 
-	if ((ref_gb->get_regs()->IF&ref_gb->get_regs()->IE)&&(regs.I||halt)){//割りこみがかかる時 // Time-consuming interrupt
-		if (halt)
-			regs.PC++;
-		write(regs.SP-2,regs.PC&0xFF);write(regs.SP-1,(regs.PC>>8));regs.SP-=2;
-		if (ref_gb->get_regs()->IF&ref_gb->get_regs()->IE&INT_VBLANK){//VBlank
-			regs.PC=0x40;
-			ref_gb->get_regs()->IF&=0xFE;
-			last_int=INT_VBLANK;
-		}
-		else if (ref_gb->get_regs()->IF&ref_gb->get_regs()->IE&INT_LCDC){//LCDC
-			regs.PC=0x48;
-			ref_gb->get_regs()->IF&=0xFD;
-			last_int=INT_LCDC;
-		}
-		else if (ref_gb->get_regs()->IF&ref_gb->get_regs()->IE&INT_TIMER){//Timer
-			regs.PC=0x50;
-			ref_gb->get_regs()->IF&=0xFB;
-			last_int=INT_TIMER;
-		}
-		else if (ref_gb->get_regs()->IF&ref_gb->get_regs()->IE&INT_SERIAL){//Serial
-			regs.PC=0x58;
-			ref_gb->get_regs()->IF&=0xF7;
-			last_int=INT_SERIAL;
-		}
-		else if (ref_gb->get_regs()->IF&ref_gb->get_regs()->IE&INT_PAD){//Pad
-			regs.PC=0x60;
-			ref_gb->get_regs()->IF&=0xEF;
-			last_int=INT_PAD;
-		}
-		else {}
+	byte pending=ref_gb->get_regs()->IF&ref_gb->get_regs()->IE&0x1F;
+	if (!pending)
+		return;
 
+	/* Wake from HALT whenever an enabled IRQ is pending — even if IME=0.
+	 * (Matches gambatte: unhalt is separate from interrupt service.) */
+	if (halt){
 		halt=false;
-		regs.I=0;
-//		ref_gb->get_regs()->IF=0;
+		regs.PC++;
+	}
+
+	/* Only service the interrupt if IME is set. */
+	if (!regs.I)
+		return;
+
+	write(regs.SP-2,regs.PC&0xFF);write(regs.SP-1,(regs.PC>>8));regs.SP-=2;
+	if (pending&INT_VBLANK){//VBlank
+		regs.PC=0x40;
+		ref_gb->get_regs()->IF&=0xFE;
+		last_int=INT_VBLANK;
+	}
+	else if (pending&INT_LCDC){//LCDC
+		regs.PC=0x48;
+		ref_gb->get_regs()->IF&=0xFD;
+		last_int=INT_LCDC;
+	}
+	else if (pending&INT_TIMER){//Timer
+		regs.PC=0x50;
+		ref_gb->get_regs()->IF&=0xFB;
+		last_int=INT_TIMER;
+	}
+	else if (pending&INT_SERIAL){//Serial
+		regs.PC=0x58;
+		ref_gb->get_regs()->IF&=0xF7;
+		last_int=INT_SERIAL;
+	}
+	else if (pending&INT_PAD){//Pad
+		regs.PC=0x60;
+		ref_gb->get_regs()->IF&=0xEF;
+		last_int=INT_PAD;
+	}
+
+	regs.I=0;
+}
+
+/* One 16-byte HDMA/GDMA chunk. Dest uses the *current* VBK mapping so games
+ * like Shantae that switch banks mid-transfer work (gambatte behaviour). */
+void cpu::do_hdma_chunk()
+{
+	if (!dma_rest)
+		return;
+
+	byte *src=NULL;
+	if (dma_src<0x4000)
+		src=ref_gb->get_mbc()->get_rom_bank0()+dma_src;
+	else if (dma_src<0x8000)
+		src=ref_gb->get_mbc()->get_rom()+dma_src-0x4000;
+	else if (dma_src>=0xA000&&dma_src<0xC000)
+		src=ref_gb->get_mbc()->get_sram()+dma_src-0xA000;
+	else if (dma_src>=0xC000&&dma_src<0xD000)
+		src=ram+dma_src-0xC000;
+	else if (dma_src>=0xD000&&dma_src<0xE000)
+		src=ram_bank+dma_src-0xD000;
+
+	if (src)
+		memcpy(vram_bank+(dma_dest&0x1ff0),src,16);
+
+	dma_src=(dma_src+16)&0xfff0;
+	dma_dest=(dma_dest+16)&0xfff0;
+	dma_rest--;
+
+	/* Stall CPU: 2 cycles/byte (×2 clock accounting in double speed). */
+	gdma_rest+=32*(speed?2:1);
+
+	if (!dma_rest){
+		dma_executing=false;
+		ref_gb->get_cregs()->HDMA5=0xFF;
 	}
 }
 
@@ -971,6 +1003,11 @@ void cpu::exec(int clocks)
 		irq_process();
 
 		op_code=op_read();
+		if (halt_bug){
+			/* DMG halt bug: first byte after HALT is reused as next fetch. */
+			regs.PC--;
+			halt_bug=false;
+		}
 		tmp_clocks=cycles[op_code];
 
 //		if (b_trace)

@@ -92,6 +92,23 @@ void gb::reset()
 	now_frame=0;
 	skip=skip_buf=0;
 	re_render=0;
+	stat_irq_line=false;
+}
+
+void gb::update_stat_irq()
+{
+	/* STAT interrupt line = OR of all enabled sources that are currently active.
+	 * IRQ fires only on rising edge (STAT blocking / Altered Space). */
+	byte st=regs.STAT;
+	byte mode=st&0x03;
+	bool line=false;
+	if ((st&0x08)&&mode==0) line=true;           /* HBlank */
+	if ((st&0x10)&&mode==1) line=true;           /* VBlank mode */
+	if ((st&0x20)&&mode==2) line=true;           /* OAM search */
+	if ((st&0x40)&&(st&0x04)) line=true;         /* LYC=LY */
+	if (line&&!stat_irq_line)
+		m_cpu->irq(INT_LCDC);
+	stat_irq_line=line;
 }
 
 void gb::hook_extport(ext_hook *ext)
@@ -165,11 +182,10 @@ void gb::run()
 			regs.LY=(regs.LY+1)%154;
 
 			regs.STAT&=0xF8;
-			if (regs.LYC==regs.LY){
+			if (regs.LYC==regs.LY)
 				regs.STAT|=4;
-				if (regs.STAT&0x40)
-					m_cpu->irq(INT_LCDC);
-			}
+			update_stat_irq();
+
 			if (regs.LY==0){
 				m_renderer->refresh();
 				if (now_frame>=skip){
@@ -182,13 +198,20 @@ void gb::run()
 				skip=skip_buf;
 			}
 			if (regs.LY>=144){ // VBlank 期間中 // During VBlank
-				regs.STAT|=1;
+				regs.STAT=(regs.STAT&0xFC)|1;
+				update_stat_irq();
+				/* HDMA continues during VBlank (one 16-byte chunk per line). */
+				if (m_cpu->dma_executing)
+					m_cpu->do_hdma_chunk();
 				if (regs.LY==144){
-					m_cpu->exec(72);
+					/* Altered Space polls LY==144 with VBlank IE enabled; it must
+					 * observe LY before the ISR runs (handler is >1 line long).
+					 * One successful LDH+CP+JR ≈ 28 cycles — allow ~32.
+					 * Daedalian Opus still gets IF early enough for HALT/D008.
+					 * Full line remains 456 cycles (not the old 448). */
+					m_cpu->exec(32);
 					m_cpu->irq(INT_VBLANK);
-					if (regs.STAT&0x10)
-						m_cpu->irq(INT_LCDC);
-					m_cpu->exec(456-80);
+					m_cpu->exec(456-32);
 				}
 				else if (regs.LY==153){
 					m_cpu->exec(80);
@@ -202,80 +225,29 @@ void gb::run()
 					m_cpu->exec(456);
 			}
 			else{ // VBlank 期間外 // Period outside VBlank
-				regs.STAT|=2;
-				if (regs.STAT&0x20)
-					m_cpu->irq(INT_LCDC);
+				regs.STAT=(regs.STAT&0xFC)|2;
+				update_stat_irq();
 				m_cpu->exec(80); // state=2
 				regs.STAT|=3;
+				update_stat_irq(); /* mode 3: usually drops STAT line */
 				m_cpu->exec(169); // state=3
 
 				if (m_cpu->dma_executing){ // HBlank DMA
-					if (m_cpu->b_dma_first){
-						m_cpu->dma_dest_bank=m_cpu->vram_bank;
-						if (m_cpu->dma_src<0x4000)
-							m_cpu->dma_src_bank=m_rom->get_rom();
-						else if (m_cpu->dma_src<0x8000)
-							m_cpu->dma_src_bank=m_mbc->get_rom()-0x4000;
-						else if (m_cpu->dma_src>=0xA000&&m_cpu->dma_src<0xC000)
-							m_cpu->dma_src_bank=m_mbc->get_sram()-0xA000;
-						else if (m_cpu->dma_src>=0xC000&&m_cpu->dma_src<0xD000)
-							m_cpu->dma_src_bank=m_cpu->ram-0xC000;
-						else if (m_cpu->dma_src>=0xD000&&m_cpu->dma_src<0xE000)
-							m_cpu->dma_src_bank=m_cpu->ram_bank-0xD000;
-						else m_cpu->dma_src_bank=NULL;
-						m_cpu->b_dma_first=false;
-					}
-					memcpy(m_cpu->dma_dest_bank+(m_cpu->dma_dest&0x1ff0),m_cpu->dma_src_bank+m_cpu->dma_src,16);
-//					fprintf(m_cpu->file,"%03d : dma exec %04X -> %04X rest %d\n",regs.LY,m_cpu->dma_src,m_cpu->dma_dest,m_cpu->dma_rest);
-
-					m_cpu->dma_src+=16;
-					m_cpu->dma_src&=0xfff0;
-					m_cpu->dma_dest+=16;
-					m_cpu->dma_dest&=0xfff0;
-					m_cpu->dma_rest--;
-					if (!m_cpu->dma_rest)
-						m_cpu->dma_executing=false;
-
-//					m_cpu->total_clock+=207*(m_cpu->speed?2:1);
-//					m_cpu->sys_clock+=207*(m_cpu->speed?2:1);
-//					m_cpu->div_clock+=207*(m_cpu->speed?2:1);
-//					regs.STAT|=3;
+					m_cpu->do_hdma_chunk();
 
 					if (now_frame>=skip)
 						m_lcd->render(vframe,regs.LY);
 
 					regs.STAT&=0xfc;
-					m_cpu->exec(207); // state=3
+					update_stat_irq();
+					m_cpu->exec(207); // state=0
 				}
 				else{
-/*					if (m_lcd->get_sprite_count()){
-						if (m_lcd->get_sprite_count()>=10){
-							m_cpu->exec(129);
-							if ((regs.STAT&0x08))
-								m_cpu->irq(INT_LCDC);
-							regs.STAT&=0xfc;
-							if (now_frame>=skip)
-								m_lcd->render(vframe,regs.LY);
-							m_cpu->exec(78); // state=0
-						}
-						else{
-							m_cpu->exec(129*m_lcd->get_sprite_count()/10);
-							if ((regs.STAT&0x08))
-								m_cpu->irq(INT_LCDC);
-							regs.STAT&=0xfc;
-							if (now_frame>=skip)
-								m_lcd->render(vframe,regs.LY);
-							m_cpu->exec(207-(129*m_lcd->get_sprite_count()/10)); // state=0
-						}
-					}
-					else{
-*/						regs.STAT&=0xfc;
+						regs.STAT&=0xfc;
 						if (now_frame>=skip)
 							m_lcd->render(vframe,regs.LY);
-						if ((regs.STAT&0x08))
-							m_cpu->irq(INT_LCDC);
+						update_stat_irq();
 						m_cpu->exec(207); // state=0
-//					}
 				}
 			}
 		}
@@ -299,6 +271,7 @@ void gb::run()
 				re_render=0;
 			}
 			regs.STAT&=0xF8;
+			update_stat_irq();
 			m_cpu->exec(456);
 		}
 	}
