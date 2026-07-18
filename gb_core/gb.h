@@ -215,6 +215,10 @@ public:
 	void hook_extport(ext_hook *ext);
 	void unhook_extport();
 
+	/* Mode-3 cycle counter for mid-scanline BGP (Prehistorik Man). */
+	bool mode3_tracking;
+	int mode3_clock;
+
 private:
 	cpu *m_cpu;
 	lcd *m_lcd;
@@ -314,6 +318,11 @@ public:
 
 	int get_sprite_count() { return sprite_count; };
 
+	/* Mid-scanline BGP (Prehistorik Man intro text). */
+	void begin_mode3(void *buf,int scanline);
+	void on_bgp_write(byte dat);
+	bool end_mode3(void *buf,int scanline);
+
 	void serialize(serializer &s);
 private:
 	void bg_render(void *buf,int scanline);
@@ -322,6 +331,7 @@ private:
 	void bg_render_color(void *buf,int scanline);
 	void win_render_color(void *buf,int scanline);
 	void sprite_render_color(void *buf,int scanline);
+	void apply_bgp_range(void *buf,int scanline,int x0,int x1);
 
 	char cur_palette;
 	word m_pal16[4];
@@ -336,6 +346,13 @@ private:
 	int sprite_count;
 
 	bool layer_enable[3];
+
+	/* Mid-line BGP state for current mode-3 scanline. */
+	int mode3_ly;
+	int mode3_x;
+	bool mode3_indexed;
+	bool mode3_used;
+	void *mode3_buf;
 
 	gb *ref_gb;
 };

@@ -93,6 +93,8 @@ void gb::reset()
 	skip=skip_buf=0;
 	re_render=0;
 	stat_irq_line=false;
+	mode3_tracking=false;
+	mode3_clock=0;
 }
 
 void gb::update_stat_irq()
@@ -232,16 +234,29 @@ void gb::run()
 			else{ // VBlank 期間外 // Period outside VBlank
 				regs.STAT=(regs.STAT&0xFC)|2;
 				update_stat_irq();
+
+				/* Track from mode 2 so LYC/STAT-timed BGP spam is caught.
+				 * Keep mode 3/0 lengths fixed (80+169+207) — variable mode 3
+				 * desyncs Prehistorik's per-line SCX wave timing. */
+				mode3_clock=0;
+				mode3_tracking=true;
+				m_lcd->begin_mode3((now_frame>=skip)?(void*)vframe:NULL,regs.LY);
 				m_cpu->exec(80); // state=2
+
 				regs.STAT|=3;
 				update_stat_irq(); /* mode 3: usually drops STAT line */
 				m_cpu->exec(169); // state=3
+				mode3_tracking=false;
 
 				if (m_cpu->dma_executing){ // HBlank DMA
 					m_cpu->do_hdma_chunk();
 
-					if (now_frame>=skip)
-						m_lcd->render(vframe,regs.LY);
+					if (now_frame>=skip){
+						if (!m_lcd->end_mode3(vframe,regs.LY))
+							m_lcd->render(vframe,regs.LY);
+					}
+					else
+						m_lcd->end_mode3(NULL,regs.LY);
 
 					regs.STAT&=0xfc;
 					update_stat_irq();
@@ -249,8 +264,12 @@ void gb::run()
 				}
 				else{
 						regs.STAT&=0xfc;
-						if (now_frame>=skip)
-							m_lcd->render(vframe,regs.LY);
+						if (now_frame>=skip){
+							if (!m_lcd->end_mode3(vframe,regs.LY))
+								m_lcd->render(vframe,regs.LY);
+						}
+						else
+							m_lcd->end_mode3(NULL,regs.LY);
 						update_stat_irq();
 						m_cpu->exec(207); // state=0
 				}

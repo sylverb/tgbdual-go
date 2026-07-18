@@ -97,6 +97,87 @@ void lcd::reset()
 	now_win_line=0;
 	layer_enable[0]=layer_enable[1]=layer_enable[2]=true;
 	sprite_count=0;
+	mode3_ly=0;
+	mode3_x=0;
+	mode3_indexed=false;
+	mode3_used=false;
+	mode3_buf=NULL;
+}
+
+void lcd::begin_mode3(void *buf,int scanline)
+{
+	mode3_ly=scanline;
+	mode3_x=0;
+	mode3_indexed=false;
+	mode3_used=false;
+	mode3_buf=buf;
+}
+
+void lcd::apply_bgp_range(void *buf,int scanline,int x0,int x1)
+{
+	if (x0<0) x0=0;
+	if (x1>160) x1=160;
+	if (x0>=x1) return;
+	word pal[4];
+	byte bgp=ref_gb->get_regs()->BGP;
+	pal[0]=m_pal16[bgp&0x3];
+	pal[1]=m_pal16[(bgp>>2)&0x3];
+	pal[2]=m_pal16[(bgp>>4)&0x3];
+	pal[3]=m_pal16[(bgp>>6)&0x3];
+	word *dat=((word*)buf)+scanline*160;
+	byte *trans=trans_tbl;
+	for (int i=x0;i<x1;i++)
+		dat[i]=pal[trans[i]&3];
+}
+
+void lcd::on_bgp_write(byte dat)
+{
+	/* DMG only: Prehistorik Man spams BGP mid-scanline for intro text.
+	 * Tracked from mode 2 through mode 3; X = clock - (80 + 6 + (SCX&7)). */
+	if (!ref_gb->mode3_tracking||!mode3_buf||
+	    ref_gb->get_rom()->get_info()->gb_type>=3){
+		ref_gb->get_regs()->BGP=dat;
+		return;
+	}
+
+	int penalty=80+6+(ref_gb->get_regs()->SCX&7);
+	int x=ref_gb->mode3_clock-penalty;
+	if (x<0) x=0;
+	if (x>160) x=160;
+	if (x<mode3_x) x=mode3_x;
+
+	if (!mode3_indexed){
+		/* Rasterise colour indices once (bg+win); palette applied in spans. */
+		bg_render(mode3_buf,mode3_ly);
+		win_render(mode3_buf,mode3_ly);
+		mode3_indexed=true;
+	}
+
+	/* [mode3_x, x) already has the previous BGP from last apply / initial render. */
+	ref_gb->get_regs()->BGP=dat;
+	if (x<160)
+		apply_bgp_range(mode3_buf,mode3_ly,x,160);
+	mode3_x=x;
+	mode3_used=true;
+}
+
+bool lcd::end_mode3(void *buf,int scanline)
+{
+	if (!mode3_used){
+		mode3_buf=NULL;
+		return false;
+	}
+	/* Finish any remaining pixels with current BGP, then sprites. */
+	if (!mode3_indexed){
+		bg_render(buf,scanline);
+		win_render(buf,scanline);
+	}
+	else if (mode3_x<160)
+		apply_bgp_range(buf,scanline,mode3_x,160);
+	sprite_render(buf,scanline);
+	mode3_buf=NULL;
+	mode3_used=false;
+	return true;
 }
 
 void lcd::bg_render(void *buf,int scanline)
@@ -188,7 +269,7 @@ void lcd::bg_render(void *buf,int scanline)
 
 	for (i=0;i<8-(x&7);i++){ // スクロール補正 // Scroll correction
 		*(dat)=*(dat+(x&7));
-		*(trans)=*(dat+(x&7));
+		*(trans)=*(trans+(x&7));
 		dat++; trans++;
 	}
 
