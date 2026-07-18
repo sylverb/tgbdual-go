@@ -193,8 +193,19 @@ void lcd::bg_render(void *buf,int scanline)
 	word pal[4];
 	byte tile;
 
+	/* WX<8 normally means the window starts at X<=0 and covers the whole
+	 * line. On CGB, WX=0..6 does not start the window at all (Warriors of
+	 * Might and Magic enables WX=0 mid-frame; treating it as full-cover
+	 * blanks the HUD). */
+	bool win_covers = (ref_gb->get_regs()->WY<=(dword)scanline&&
+	                   ref_gb->get_regs()->WX<8&&
+	                   (ref_gb->get_regs()->LCDC&0x20));
+	if (win_covers&&ref_gb->get_rom()->get_info()->gb_type>=3&&
+	    ref_gb->get_regs()->WX<7)
+		win_covers=false;
+
 	if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x01)||
-		(ref_gb->get_regs()->WY<=(dword)scanline&&ref_gb->get_regs()->WX<8&&(ref_gb->get_regs()->LCDC&0x20)))
+		win_covers)
 	{
 		if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x01))
 		{
@@ -318,6 +329,9 @@ void lcd::win_render(void *buf,int scanline)
 //			memset(((word*)buf)+160*scanline,0,160*2);
 		return;
 	}
+	/* CGB: WX=0..6 never triggers the window (SameBoy / Warriors of M&M). */
+	if (ref_gb->get_rom()->get_info()->gb_type>=3&&ref_gb->get_regs()->WX<7)
+		return;
 
 	int y=now_win_line-1/*scanline-res->system_reg.WY*/;
 	now_win_line++;
@@ -506,10 +520,18 @@ void lcd::bg_render_color(void *buf,int scanline)
 	word share=0x0000;//prefix
 	trans_count=0;
 
+	/* See bg_render(): CGB WX=0..6 must not suppress the background. */
+	bool win_covers = (ref_gb->get_regs()->WY<=(dword)scanline&&
+	                   ref_gb->get_regs()->WX<8&&
+	                   (ref_gb->get_regs()->LCDC&0x20));
+	if (win_covers&&ref_gb->get_rom()->get_info()->gb_type>=3&&
+	    ref_gb->get_regs()->WX<7)
+		win_covers=false;
+
 	// カラーではOFF機能が働かない?(僕のキャンプ場､モンコレナイト)
 	// OFF function does not work in color? (my campsite, Moncolle Night)
 	if (!(ref_gb->get_regs()->LCDC&0x80)/*||!(ref_gb->get_regs()->LCDC&0x01)*/||
-		(ref_gb->get_regs()->WY<=(dword)scanline&&ref_gb->get_regs()->WX<8&&(ref_gb->get_regs()->LCDC&0x20))){
+		win_covers){
 		if (!(ref_gb->get_regs()->LCDC&0x80)/*||!(ref_gb->get_regs()->LCDC&0x01)*/){
 			word *tmp_w=(word*)buf+160*scanline;
 			word tmp_dat=get_blank_color();
@@ -671,6 +693,9 @@ void lcd::win_render_color(void *buf,int scanline)
 //			memset(((word*)buf)+160*scanline,0,160*2);
 		return;
 	}
+	/* CGB: WX=0..6 never triggers the window (Warriors of Might and Magic). */
+	if (ref_gb->get_rom()->get_info()->gb_type>=3&&ref_gb->get_regs()->WX<7)
+		return;
 
 	int y=now_win_line-1/*scanline-res->system_reg.WY*/;
 	now_win_line++;
