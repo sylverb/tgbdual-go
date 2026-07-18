@@ -463,6 +463,8 @@ private:
 	void huc1_write(word adr,byte dat);
 	void huc3_write(word adr,byte dat);
 	void tama5_write(word adr,byte dat);
+	byte tama5_ext_read(word adr);
+	void tama5_ext_write(word adr,byte dat);
 	void mmm01_write(word adr,byte dat);
 
 	byte *rom_bank0;
@@ -500,6 +502,19 @@ private:
 
 	bool huc1_16_8;
 	byte huc1_dat;
+
+	/* Bandai TAMA5 (Tamagotchi Osutchi/Mesutchi) — ares-style HLE */
+	bool tama5_ready;
+	byte tama5_select;
+	byte tama5_mode;
+	byte tama5_index;
+	byte tama5_input;
+	byte tama5_output;
+	byte tama5_rom_bank;
+	byte tama5_rtc_year,tama5_rtc_month,tama5_rtc_day;
+	byte tama5_rtc_hour,tama5_rtc_minute,tama5_rtc_second;
+	byte tama5_rtc_meridian,tama5_rtc_leap,tama5_rtc_hour_mode;
+	byte tama5_rtc_test,tama5_rtc_index;
 
 	gb *ref_gb;
 };

@@ -82,6 +82,25 @@ void mbc::reset()
 
 	if (ref_gb->get_rom()->get_info()->cart_type==0xFD){
 		ext_is_ram=false;
+		tama5_ready=false;
+		tama5_select=0;
+		tama5_mode=0;
+		tama5_index=0;
+		tama5_input=0;
+		tama5_output=0;
+		tama5_rom_bank=1;
+		tama5_rtc_year=0;
+		tama5_rtc_month=1;
+		tama5_rtc_day=1;
+		tama5_rtc_hour=0;
+		tama5_rtc_minute=0;
+		tama5_rtc_second=0;
+		tama5_rtc_meridian=0;
+		tama5_rtc_leap=1;
+		tama5_rtc_hour_mode=1;
+		tama5_rtc_test=0;
+		tama5_rtc_index=0;
+		set_bank(1);
 	}
 }
 
@@ -192,9 +211,7 @@ byte mbc::ext_read(word adr)
 		}
 		return 0xff;
 	case 0xFD:
-//		extern FILE *file;
-//		fprintf(file,"%04X : TAMA5 ext_read %04X \n",ref_gb->get_cpu()->get_regs()->PC,adr);
-		return 1;
+		return tama5_ext_read(adr);
 	case 0xFE:
 //		extern FILE *file;
 //		fprintf(file,"%04X : HuC-3 ext_read %04X \n",ref_gb->get_cpu()->get_regs()->PC,adr);
@@ -235,8 +252,7 @@ void mbc::ext_write(word adr,byte dat)
 //		fprintf(file,"%04X : HuC-3 ext_write %04X <= %02X\n",ref_gb->get_cpu()->get_regs()->PC,adr,dat);
 		break;
 	case 0xFD: //TAMA5
-//		extern FILE *file;
-//		fprintf(file,"%04X : TAMA5 ext_write %04X <= %02X\n",ref_gb->get_cpu()->get_regs()->PC,adr,dat);
+		tama5_ext_write(adr,dat);
 		break;
 	case 0x22: // コロコロカービィ // Korokoro Kirby
 		if (adr==0xA080){
@@ -819,8 +835,133 @@ void mbc::huc3_write(word adr,byte dat)
 
 void mbc::tama5_write(word adr,byte dat)
 {
-//	extern FILE *file;
-//	fprintf(file,"TAMA5 write %04X <= %02X\n",adr,dat);
+	/* Control is entirely via $A000/$A001 (ext_*). */
+	(void)adr;(void)dat;
+}
+
+byte mbc::tama5_ext_read(word adr)
+{
+	/* Odd addresses are the select port (write-only). */
+	if (adr&1)
+		return 0xFF;
+
+	if (tama5_select==0x0A)
+		return (byte)(0xF0|(tama5_ready?1:0));
+
+	if (tama5_mode==0||tama5_mode==1){
+		if (tama5_select==0x0C)
+			return (byte)(0xF0|(tama5_output&0x0F));
+		if (tama5_select==0x0D)
+			return (byte)(0xF0|(tama5_output>>4));
+	}
+
+	if (tama5_mode==2||tama5_mode==4){
+		if (tama5_select==0x0C||tama5_select==0x0D){
+			byte data=0;
+			switch(tama5_rtc_index){
+			case 0: data=(byte)(tama5_rtc_minute%10); break;
+			case 1: data=(byte)(tama5_rtc_minute/10); break;
+			case 2: data=(byte)(tama5_rtc_hour%10); break;
+			case 3: data=(byte)(tama5_rtc_hour/10); break;
+			case 4: data=(byte)(tama5_rtc_day/10); break;
+			case 5: data=(byte)(tama5_rtc_day%10); break;
+			case 6: data=(byte)(tama5_rtc_month/10); break;
+			case 7: data=(byte)(tama5_rtc_month%10); break;
+			default: data=0; break;
+			}
+			tama5_rtc_index++;
+			return (byte)(0xF0|(data&0x0F));
+		}
+	}
+
+	return 0xFF;
+}
+
+void mbc::tama5_ext_write(word adr,byte dat)
+{
+	int mask=rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1;
+	byte *sram=ref_gb->get_rom()->get_sram();
+
+	if (adr&1){
+		/* $A001: register select (low nibble). */
+		tama5_select=(byte)(dat&0x0F);
+		if (tama5_select==0x0A)
+			tama5_ready=true;
+		return;
+	}
+
+	/* $A000: data nibble for current select. */
+	dat&=0x0F;
+
+	if (tama5_select==0x00){
+		tama5_rom_bank=(byte)((tama5_rom_bank&0x10)|(dat&0x0F));
+		set_bank(tama5_rom_bank&mask);
+	}
+	else if (tama5_select==0x01){
+		tama5_rom_bank=(byte)((tama5_rom_bank&0x0F)|((dat&1)<<4));
+		set_bank(tama5_rom_bank&mask);
+	}
+	else if (tama5_select==0x04){
+		tama5_input=(byte)((tama5_input&0xF0)|(dat&0x0F));
+	}
+	else if (tama5_select==0x05){
+		tama5_input=(byte)((tama5_input&0x0F)|((dat&0x0F)<<4));
+	}
+	else if (tama5_select==0x06){
+		tama5_index=(byte)((tama5_index&0x0F)|((dat&1)<<4));
+		tama5_mode=(byte)((dat>>1)&7);
+	}
+	else if (tama5_select==0x07){
+		tama5_index=(byte)((tama5_index&0x10)|(dat&0x0F));
+
+		if (tama5_mode==0){
+			/* RAM write (32 bytes). */
+			if (sram)
+				sram[tama5_index&0x1F]=tama5_input;
+		}
+		else if (tama5_mode==1){
+			/* RAM read. */
+			tama5_output=sram?sram[tama5_index&0x1F]:0xFF;
+		}
+		else if (tama5_mode==2&&tama5_index==0x04){
+			/* input is BCD minute */
+			tama5_rtc_minute=(byte)((tama5_input&0x0F)+((tama5_input>>4)&0x0F)*10);
+		}
+		else if (tama5_mode==2&&tama5_index==0x05){
+			tama5_rtc_hour=(byte)((tama5_input&0x0F)+((tama5_input>>4)&0x0F)*10);
+			tama5_rtc_meridian=(byte)(tama5_rtc_hour>=12);
+		}
+		else if (tama5_mode==4&&tama5_index==0x00){
+			byte cmd=(byte)(tama5_input&0x0F);
+			byte nib=(byte)((tama5_input>>4)&0x0F);
+			if (cmd==0x07)
+				tama5_rtc_day=(byte)((tama5_rtc_day/10)*10+nib);
+			else if (cmd==0x08)
+				tama5_rtc_day=(byte)((tama5_rtc_day%10)+nib*10);
+			else if (cmd==0x09)
+				tama5_rtc_month=(byte)((tama5_rtc_month/10)*10+nib);
+			else if (cmd==0x0A)
+				tama5_rtc_month=(byte)((tama5_rtc_month%10)+nib*10);
+			else if (cmd==0x0B)
+				tama5_rtc_year=(byte)((tama5_rtc_year/10)*10+nib);
+			else if (cmd==0x0C)
+				tama5_rtc_year=(byte)((tama5_rtc_year%10)+nib*10);
+		}
+		else if (tama5_mode==4&&tama5_index==0x02){
+			byte cmd=(byte)(tama5_input&0x0F);
+			if (cmd==0x0A){
+				tama5_rtc_hour_mode=(byte)((tama5_input>>4)&1);
+				tama5_rtc_second=0;
+			}
+			else if (cmd==0x0B)
+				tama5_rtc_leap=(byte)((tama5_input>>4)&3);
+			else if (cmd==0x0E)
+				tama5_rtc_test=(byte)((tama5_input>>4)&0x0F);
+		}
+		else if (tama5_mode==2&&tama5_index==0x06){
+			tama5_rtc_index=0;
+		}
+	}
 }
 
 void mbc::mmm01_write(word adr,byte dat)
@@ -899,5 +1040,13 @@ void mbc::serialize(serializer &s)
 	s_VAR(mbc7_buf);   s_VAR(mbc7_count);
 
 	s_VAR(huc1_16_8);  s_VAR(huc1_dat);
+
+	s_VAR(tama5_ready); s_VAR(tama5_select); s_VAR(tama5_mode);
+	s_VAR(tama5_index); s_VAR(tama5_input); s_VAR(tama5_output);
+	s_VAR(tama5_rom_bank);
+	s_VAR(tama5_rtc_year); s_VAR(tama5_rtc_month); s_VAR(tama5_rtc_day);
+	s_VAR(tama5_rtc_hour); s_VAR(tama5_rtc_minute); s_VAR(tama5_rtc_second);
+	s_VAR(tama5_rtc_meridian); s_VAR(tama5_rtc_leap); s_VAR(tama5_rtc_hour_mode);
+	s_VAR(tama5_rtc_test); s_VAR(tama5_rtc_index);
 }
 
