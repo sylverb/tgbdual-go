@@ -98,7 +98,12 @@ void gb::reset()
 void gb::update_stat_irq()
 {
 	/* STAT interrupt line = OR of all enabled sources that are currently active.
-	 * IRQ fires only on rising edge (STAT blocking / Altered Space). */
+	 * IRQ fires only on rising edge (STAT blocking / Altered Space).
+	 * While LCD is off, PPU STAT sources are inactive (gambatte-style). */
+	if (!(regs.LCDC&0x80)){
+		stat_irq_line=false;
+		return;
+	}
 	byte st=regs.STAT;
 	byte mode=st&0x03;
 	bool line=false;
@@ -253,7 +258,6 @@ void gb::run()
 		}
 		else{ // LCDC 停止時 // LCDC is stopped
 			regs.LY=0;
-//			regs.LY=(regs.LY+1)%154;
 			re_render++;
 			if (re_render>=154){
 				word blank=m_lcd->get_blank_color();
@@ -270,8 +274,8 @@ void gb::run()
 				m_lcd->clear_win_count();
 				re_render=0;
 			}
-			regs.STAT&=0xF8;
-			update_stat_irq();
+			/* Mode 0 while LCD off, but freeze LYC coincidence (Mr. Do). */
+			regs.STAT&=0xFC;
 			m_cpu->exec(456);
 		}
 	}
