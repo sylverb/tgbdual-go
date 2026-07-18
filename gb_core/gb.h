@@ -607,6 +607,10 @@ public:
 private:
 	byte inline io_read(word adr);
 	void inline io_write(word adr,byte dat);
+	void timer_advance(int cycles);
+	void timer_inc_tima();
+	void timer_on_tac_write(byte new_tac);
+	void timer_on_div_write();
 	byte op_read() { return read(regs.PC++); }
 	word op_readw() { regs.PC+=2;return readw(regs.PC-2); }
 
