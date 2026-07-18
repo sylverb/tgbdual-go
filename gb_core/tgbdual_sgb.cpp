@@ -1,11 +1,12 @@
 /*--------------------------------------------------
    TGB Dual - Gameboy Emulator -
-   Super Game Boy HLE (detection + palettes + ATTR).
-   Packet bitbang based on SameBoy / Pan Docs.
+   Super Game Boy HLE (palettes, ATTR, border).
+   Packet bitbang / transfers based on SameBoy / Pan Docs.
 --------------------------------------------------*/
 
 #include "gb.h"
 #include "tgbdual_sgb.h"
+#include "serializer.h"
 #include <string.h>
 
 enum {
@@ -46,9 +47,13 @@ void sgb::reset()
 	transfer_dest = TRN_NONE;
 	mask = MASK_OFF;
 	border_blank = 0;
+	border_ready = false;
 	memset(ram_palettes, 0, sizeof(ram_palettes));
 	memset(attribute_files, 0, sizeof(attribute_files));
 	memset(attribute_map, 0, sizeof(attribute_map));
+	memset(border_tiles, 0, sizeof(border_tiles));
+	memset(border_map, 0, sizeof(border_map));
+	memset(border_pal, 0, sizeof(border_pal));
 	static const word def[4] = { 0x7FFF, 0x56B5, 0x294A, 0x0000 };
 	for (int p = 0; p < 4; p++)
 		for (int c = 0; c < 4; c++)
@@ -142,7 +147,6 @@ void sgb::apply_pal_set()
 void sgb::command_ready()
 {
 	byte header = command[0];
-	/* Ignore malformed 0-length commands. */
 	if ((header & 7) == 0)
 		return;
 
@@ -173,10 +177,13 @@ void sgb::command_ready()
 		current_player = (byte)(current_player & (player_count - 1));
 		break;
 	case SGB_CHR_TRN:
-	case SGB_PCT_TRN:
-		/* Borders unsupported — freeze display so bitpatterns stay hidden. */
 		vram_transfer_countdown = 3;
-		transfer_dest = TRN_DISCARD;
+		transfer_dest = (command[1] & 1) ? TRN_BORDER_HIGH : TRN_BORDER_LOW;
+		border_blank = 8;
+		break;
+	case SGB_PCT_TRN:
+		vram_transfer_countdown = 3;
+		transfer_dest = TRN_BORDER_MAP;
 		border_blank = 8;
 		break;
 	case SGB_ATTR_TRN:
@@ -210,7 +217,7 @@ void sgb::on_new_frame()
 
 void sgb::do_vram_transfer()
 {
-	if (transfer_dest == TRN_DISCARD || transfer_dest == TRN_NONE)
+	if (transfer_dest == TRN_NONE)
 		return;
 
 	byte *vram = ref_gb->get_cpu()->get_vram();
@@ -219,9 +226,20 @@ void sgb::do_vram_transfer()
 	byte scy = ref_gb->get_regs()->SCY;
 	int map_base = (lcdc & 0x08) ? 0x1C00 : 0x1800;
 	bool unsigned_tiles = (lcdc & 0x10) != 0;
-	unsigned ntiles = (transfer_dest == TRN_ATTRIBUTES) ? 0xFE : 0x100;
+
+	unsigned ntiles = 0x100;
+	word *dest = NULL;
+	if (transfer_dest == TRN_ATTRIBUTES)
+		ntiles = 0xFE;
+	else if (transfer_dest == TRN_BORDER_MAP)
+		ntiles = 0x88;
+	else if (transfer_dest == TRN_BORDER_LOW)
+		dest = (word *)border_tiles;
+	else if (transfer_dest == TRN_BORDER_HIGH)
+		dest = (word *)border_tiles + 0x800;
+
 	word tmp[0x100 * 8];
-	word *out = tmp;
+	word *out = dest ? dest : tmp;
 
 	for (unsigned tile = 0; tile < ntiles; tile++) {
 		unsigned tile_x = (tile % 20) * 8;
@@ -242,6 +260,94 @@ void sgb::do_vram_transfer()
 		memcpy(ram_palettes, tmp, 0x1000);
 	else if (transfer_dest == TRN_ATTRIBUTES)
 		memcpy(attribute_files, tmp, sizeof(attribute_files));
+	else if (transfer_dest == TRN_BORDER_MAP) {
+		/* raw_data[0x440]: map[32*32] then palette[16*4] */
+		memcpy(border_map, tmp, sizeof(border_map));
+		memcpy(border_pal, tmp + 32 * 32, sizeof(border_pal));
+		border_ready = true;
+	}
+}
+
+void sgb::blit_frame(word *lcd, int lcd_w, int lcd_h,
+                     const word *gb_rgb, int gb_w, int gb_h) const
+{
+	/* Centered 1:1 SGB frame on the LCD. Render tile-by-tile: the first
+	 * implementation decoded every border pixel and called virtual
+	 * map_color() for it, which was much too expensive on STM32. */
+	int ox = (lcd_w - SGB_BORDER_WIDTH) / 2;
+	int oy = (lcd_h - SGB_BORDER_HEIGHT) / 2;
+	if (ox < 0) ox = 0;
+	if (oy < 0) oy = 0;
+
+	word color0 = ref_gb->get_renderer()->map_color(pal[0][0]);
+	word black = ref_gb->get_renderer()->map_color(0);
+	word mapped_border_pal[16 * 4];
+	for (unsigned i = 0; i < 16 * 4; i++)
+		mapped_border_pal[i] =
+			ref_gb->get_renderer()->map_color(border_pal[i]);
+
+	/* Only clear the margins outside the 256x224 SGB image. Inside it,
+	 * border tiles and the GB framebuffer overwrite every pixel once. */
+	for (int y = 0; y < oy; y++) {
+		word *row = lcd + y * lcd_w;
+		for (int x = 0; x < lcd_w; x++)
+			row[x] = black;
+	}
+	for (int y = oy; y < oy + SGB_BORDER_HEIGHT && y < lcd_h; y++) {
+		word *row = lcd + y * lcd_w;
+		for (int x = 0; x < ox; x++)
+			row[x] = black;
+		for (int x = ox + SGB_BORDER_WIDTH; x < lcd_w; x++)
+			row[x] = black;
+	}
+	for (int y = oy + SGB_BORDER_HEIGHT; y < lcd_h; y++) {
+		word *row = lcd + y * lcd_w;
+		for (int x = 0; x < lcd_w; x++)
+			row[x] = black;
+	}
+
+	/* The 20x18 GB tile window is copied afterwards, so don't spend CPU
+	 * decoding the border underneath it. Decorative border overlap inside
+	 * the GB window is intentionally omitted in this embedded fast path. */
+	for (unsigned tile_y = 0; tile_y < 28; tile_y++) {
+		for (unsigned tile_x = 0; tile_x < 32; tile_x++) {
+			if (tile_x >= 6 && tile_x < 26 &&
+			    tile_y >= 5 && tile_y < 23)
+				continue;
+			word tile = border_map[tile_x + tile_y * 32];
+			byte flip_x = (tile & 0x4000) ? 0 : 7;
+			byte flip_y = (tile & 0x8000) ? 7 : 0;
+			byte pal_i = (byte)((tile >> 10) & 3);
+			unsigned tile_base = (unsigned)(tile & 0xFF) * 32;
+
+			for (unsigned y = 0; y < 8; y++) {
+				word *dst = lcd + (oy + (int)tile_y * 8 + (int)y) * lcd_w +
+				            ox + (int)tile_x * 8;
+				if (tile & 0x300) {
+					for (unsigned x = 0; x < 8; x++)
+						dst[x] = color0;
+					continue;
+				}
+				unsigned base = tile_base + (unsigned)(y ^ flip_y) * 2;
+				for (unsigned x = 0; x < 8; x++) {
+					byte bit = (byte)(1 << (x ^ flip_x));
+					byte color = (byte)(((border_tiles[base] & bit) ? 1 : 0) |
+					                    ((border_tiles[base + 1] & bit) ? 2 : 0) |
+					                    ((border_tiles[base + 16] & bit) ? 4 : 0) |
+					                    ((border_tiles[base + 17] & bit) ? 8 : 0));
+					dst[x] = color ? mapped_border_pal[color + pal_i * 16]
+					               : color0;
+				}
+			}
+		}
+	}
+
+	/* Copy the already-colorized native GB frame into the SGB window. */
+	int gbx = ox + SGB_GB_X;
+	int gby = oy + SGB_GB_Y;
+	for (int y = 0; y < gb_h; y++)
+		memcpy(lcd + (gby + y) * lcd_w + gbx,
+		       gb_rgb + y * gb_w, (size_t)gb_w * sizeof(word));
 }
 
 void sgb::joyp_write(byte value)
@@ -341,4 +447,8 @@ void sgb::serialize(serializer &s)
 	s_VAR(transfer_dest);
 	s_VAR(mask);
 	s_VAR(border_blank);
+	s_ARRAY(border_tiles);
+	s_ARRAY(border_map);
+	s_ARRAY(border_pal);
+	s_VAR(border_ready);
 }

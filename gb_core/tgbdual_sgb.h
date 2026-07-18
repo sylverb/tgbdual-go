@@ -1,7 +1,7 @@
 /*--------------------------------------------------
    TGB Dual - Gameboy Emulator -
-   Super Game Boy HLE: joypad packet bitbang, MLT_REQ
-   detection, and palette commands (no borders).
+   Super Game Boy HLE: joypad packet bitbang, MLT_REQ,
+   palettes/ATTR, and border (CHR_TRN / PCT_TRN).
 --------------------------------------------------*/
 #ifndef TGBDUAL_SGB_H
 #define TGBDUAL_SGB_H
@@ -17,6 +17,12 @@ enum {
 	GB_CONSOLE_CGB = 2,
 	GB_CONSOLE_SGB = 3,
 };
+
+/* Full SGB frame including border (SNES). GB screen at (48,40). */
+#define SGB_BORDER_WIDTH  256
+#define SGB_BORDER_HEIGHT 224
+#define SGB_GB_X 48
+#define SGB_GB_Y 40
 
 class sgb
 {
@@ -44,6 +50,12 @@ public:
 	 * (MASK_EN freeze/black/color0, or border TRN holdoff). */
 	bool screen_blanked() const;
 
+	bool has_border() const { return border_ready; }
+
+	/* Composite border + GB frame into lcd (RGB565), centered 1:1 on 320×240. */
+	void blit_frame(word *lcd, int lcd_w, int lcd_h,
+	                const word *gb_rgb, int gb_w, int gb_h) const;
+
 	void serialize(serializer &s);
 
 private:
@@ -57,7 +69,9 @@ private:
 		TRN_NONE = 0,
 		TRN_PALETTES = 1,
 		TRN_ATTRIBUTES = 2,
-		TRN_DISCARD = 3, /* CHR_TRN / PCT_TRN — timing only, no borders */
+		TRN_BORDER_LOW = 3,
+		TRN_BORDER_HIGH = 4,
+		TRN_BORDER_MAP = 5,
 	};
 
 	void command_ready();
@@ -89,6 +103,12 @@ private:
 	byte mask;
 	/* Extra freeze frames after border TRNs (pattern still in VRAM). */
 	byte border_blank;
+
+	/* SNES 4bpp tiles (256 × 32 bytes) + map/palettes from PCT_TRN. */
+	byte border_tiles[0x100 * 32];
+	word border_map[32 * 32];
+	word border_pal[16 * 4];
+	bool border_ready;
 };
 
 #endif
