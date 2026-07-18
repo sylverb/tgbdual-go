@@ -22,6 +22,7 @@
 // inline assembler あり 適宜変更せよ
 
 #include "gb.h"
+#include "tgbdual_sgb.h"
 
 // Color palette is in BGR555 format
 static word dmg_palettes[][4] = {
@@ -50,6 +51,7 @@ lcd::lcd(gb *ref)
 {
 	ref_gb=ref;
 
+	sgb_color_active=false;
 	set_palette(0); // Default GB palette
 
 	reset();
@@ -70,8 +72,26 @@ char lcd::get_palette_count() {
 void lcd::set_palette(char index)
 {
 	cur_palette = index;
+	sgb_color_active=false;
 	for (int i=0;i<4;i++){
 		m_pal16[i]=ref_gb->get_renderer()->map_color(dmg_palettes[index][i]);
+	}
+}
+
+void lcd::apply_sgb_palettes(const word pals[4][4])
+{
+	sgb_color_active=true;
+	for (int p = 0; p < 4; p++) {
+		for (int i = 0; i < 4; i++) {
+			word c = pals[p][i] & 0x7FFF;
+			m_sgb_pal[p][i] = ref_gb->get_renderer()->map_color(c);
+		}
+	}
+	/* Default mono path / shared BG uses palette 0; OBJ uses palette 1. */
+	for (int i = 0; i < 4; i++) {
+		m_pal16[i] = m_sgb_pal[0][i];
+		m_obp_sgb[0][i] = m_sgb_pal[1][i];
+		m_obp_sgb[1][i] = m_sgb_pal[1][i];
 	}
 }
 
@@ -94,6 +114,7 @@ bool lcd::get_enable(int layer)
 
 void lcd::reset()
 {
+	sgb_color_active=false;
 	now_win_line=0;
 	layer_enable[0]=layer_enable[1]=layer_enable[2]=true;
 	sprite_count=0;
@@ -139,6 +160,11 @@ void lcd::on_bgp_write(byte dat)
 		ref_gb->get_regs()->BGP=dat;
 		return;
 	}
+	/* Don't rasterise transfer patterns while SGB is blanking the screen. */
+	if (ref_gb->get_sgb() && ref_gb->get_sgb()->screen_blanked()){
+		ref_gb->get_regs()->BGP=dat;
+		return;
+	}
 
 	int penalty=80+6+(ref_gb->get_regs()->SCX&7);
 	int x=ref_gb->mode3_clock-penalty;
@@ -166,6 +192,11 @@ bool lcd::end_mode3(void *buf,int scanline)
 	if (!mode3_used){
 		mode3_buf=NULL;
 		return false;
+	}
+	if (ref_gb->get_sgb() && ref_gb->get_sgb()->screen_blanked()){
+		mode3_buf=NULL;
+		mode3_used=false;
+		return false; /* fall through to render() blanking */
 	}
 	/* Finish any remaining pixels with current BGP, then sprites. */
 	if (!mode3_indexed){
@@ -245,6 +276,17 @@ void lcd::bg_render(void *buf,int scanline)
 	now_pat=(word*)(vrams[0]+pat+((y&7)<<1));
 
 	tile=*(now_tile++);
+	if (sgb_color_active && ref_gb->get_sgb()) {
+		const byte *am = ref_gb->get_sgb()->attr_map();
+		int aty = (scanline >> 3);
+		if (aty > 17) aty = 17;
+		word *sp = m_sgb_pal[am[aty * 20] & 3];
+		word bgp = ref_gb->get_regs()->BGP;
+		pal[0] = sp[bgp & 3];
+		pal[1] = sp[(bgp >> 2) & 3];
+		pal[2] = sp[(bgp >> 4) & 3];
+		pal[3] = sp[(bgp >> 6) & 3];
+	}
 	tmp_dat=(tile&0x80)?*(now_share+(tile<<3)):*(now_pat+(tile<<3));
 	calc1=tmp_dat;
 	calc2=tmp_dat>>7;
@@ -290,6 +332,18 @@ void lcd::bg_render(void *buf,int scanline)
 			prefix=256;
 		}
 		tile=*(now_tile++);
+		if (sgb_color_active && ref_gb->get_sgb()) {
+			const byte *am = ref_gb->get_sgb()->attr_map();
+			int atx = i < 19 ? (i + 1) : 19;
+			int aty = (scanline >> 3);
+			if (aty > 17) aty = 17;
+			word *sp = m_sgb_pal[am[aty * 20 + atx] & 3];
+			word bgp = ref_gb->get_regs()->BGP;
+			pal[0] = sp[bgp & 3];
+			pal[1] = sp[(bgp >> 2) & 3];
+			pal[2] = sp[(bgp >> 4) & 3];
+			pal[3] = sp[(bgp >> 6) & 3];
+		}
 		tmp_dat=(tile&0x80)?*(now_share+(tile<<3)):*(now_pat+(tile<<3));
 		calc1=tmp_dat;
 		calc2=tmp_dat>>7;
@@ -405,15 +459,25 @@ void lcd::sprite_render(void *buf,int scanline)
 	bool sp_size=(ref_gb->get_regs()->LCDC&0x04)?true:false;
 	int palnum;
 
-	pal[0][0]=m_pal16[ref_gb->get_regs()->OBP1&0x3];
-	pal[0][1]=m_pal16[(ref_gb->get_regs()->OBP1>>2)&0x3];
-	pal[0][2]=m_pal16[(ref_gb->get_regs()->OBP1>>4)&0x3];
-	pal[0][3]=m_pal16[(ref_gb->get_regs()->OBP1>>6)&0x3];
-
-	pal[1][0]=m_pal16[ref_gb->get_regs()->OBP2&0x3];
-	pal[1][1]=m_pal16[(ref_gb->get_regs()->OBP2>>2)&0x3];
-	pal[1][2]=m_pal16[(ref_gb->get_regs()->OBP2>>4)&0x3];
-	pal[1][3]=m_pal16[(ref_gb->get_regs()->OBP2>>6)&0x3];
+	if (sgb_color_active){
+		pal[0][0]=m_obp_sgb[0][ref_gb->get_regs()->OBP1&0x3];
+		pal[0][1]=m_obp_sgb[0][(ref_gb->get_regs()->OBP1>>2)&0x3];
+		pal[0][2]=m_obp_sgb[0][(ref_gb->get_regs()->OBP1>>4)&0x3];
+		pal[0][3]=m_obp_sgb[0][(ref_gb->get_regs()->OBP1>>6)&0x3];
+		pal[1][0]=m_obp_sgb[1][ref_gb->get_regs()->OBP2&0x3];
+		pal[1][1]=m_obp_sgb[1][(ref_gb->get_regs()->OBP2>>2)&0x3];
+		pal[1][2]=m_obp_sgb[1][(ref_gb->get_regs()->OBP2>>4)&0x3];
+		pal[1][3]=m_obp_sgb[1][(ref_gb->get_regs()->OBP2>>6)&0x3];
+	}else{
+		pal[0][0]=m_pal16[ref_gb->get_regs()->OBP1&0x3];
+		pal[0][1]=m_pal16[(ref_gb->get_regs()->OBP1>>2)&0x3];
+		pal[0][2]=m_pal16[(ref_gb->get_regs()->OBP1>>4)&0x3];
+		pal[0][3]=m_pal16[(ref_gb->get_regs()->OBP1>>6)&0x3];
+		pal[1][0]=m_pal16[ref_gb->get_regs()->OBP2&0x3];
+		pal[1][1]=m_pal16[(ref_gb->get_regs()->OBP2>>2)&0x3];
+		pal[1][2]=m_pal16[(ref_gb->get_regs()->OBP2>>4)&0x3];
+		pal[1][3]=m_pal16[(ref_gb->get_regs()->OBP2>>6)&0x3];
+	}
 
 	for (i=39;i>=0;i--){
 		tile=oam[i*4+2];
@@ -891,6 +955,23 @@ void lcd::render(void *buf,int scanline)
 {
 	sprite_count=0;
 
+	/* SGB MASK_EN / border TRNs: don't show VRAM transfer bitpatterns.
+	 * FREEZE (and border holdoff) keep the previous frame — filling black
+	 * every masked frame caused a white/black blink when games toggle MASK. */
+	if (ref_gb->get_sgb() && ref_gb->get_sgb()->screen_blanked()) {
+		byte m = ref_gb->get_sgb()->mask_mode();
+		if (m == 2 || m == 3) {
+			word *line = ((word *)buf) + 160 * scanline;
+			word fill = (m == 3)
+				? (sgb_color_active ? m_sgb_pal[0][0] : m_pal16[0])
+				: ref_gb->get_renderer()->map_color(0);
+			for (int t = 0; t < 160; t++)
+				line[t] = fill;
+		}
+		/* m==1 FREEZE, or mask off with border/transfer holdoff: leave pixels. */
+		return;
+	}
+
 	if (ref_gb->get_rom()->get_info()->gb_type>=3){
 //		for (int i=0;i<64;i++)
 //			mapped_pal[i>>2][i&3]=ref_gb->get_renderer()->map_color(col_pal[i>>2][i&3]);
@@ -936,8 +1017,14 @@ void lcd::render(void *buf,int scanline)
 
 void lcd::serialize(serializer &s)
 {
-	s_VAR(cur_palette); set_palette(cur_palette);
+	/* Do not call set_palette() here — it clears SGB colors and was run on
+	 * SAVE as well as LOAD, so creating a savestate in SGB mode wiped the
+	 * live palette back to the DMG preset. */
+	s_VAR(cur_palette);
+	s_VAR(sgb_color_active);
 	s_ARRAY(m_pal16);
+	s_ARRAY(m_sgb_pal);
+	s_ARRAY(m_obp_sgb);
 	s_ARRAY(col_pal); // the only one that was in the original state format.
 	s_ARRAY(mapped_pal);
 	s_VAR(trans_count);

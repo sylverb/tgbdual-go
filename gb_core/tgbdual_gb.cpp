@@ -22,6 +22,7 @@
 // Interface with external / other unit emulation GB
 
 #include "gb.h"
+#include "tgbdual_sgb.h"
 #include <stdlib.h>
 
 gb::gb(renderer *ref,bool b_lcd,bool b_apu)
@@ -33,6 +34,8 @@ gb::gb(renderer *ref,bool b_lcd,bool b_apu)
 	m_apu=new apu(this);// ROMより後に作られたし // I was made ​​later than the ROM
 	m_mbc=new mbc(this);
 	m_cpu=new cpu(this);
+	m_sgb=new sgb(this);
+	console_mode=GB_CONSOLE_DMG;
 #if CHEAT_CODES == 1
 	m_cheat=new cheat(this);
 #endif
@@ -51,6 +54,7 @@ gb::~gb()
 {
 	m_renderer->set_sound_renderer(NULL);
 
+	delete m_sgb;
 	delete m_mbc;
 	delete m_rom;
 	delete m_apu;
@@ -82,10 +86,15 @@ void gb::reset()
 	memset(&c_regs,0,sizeof(c_regs));
 
 	if (m_rom->get_loaded())
-		m_rom->get_info()->gb_type=(m_rom->get_rom()[0x143]&0x80)?(use_gba?4:3):1;
+		m_rom->get_info()->gb_type=resolve_gb_type();
 
+	m_sgb->reset();
+	m_sgb->set_enabled(m_rom->get_loaded() && m_rom->get_info()->gb_type==2);
 	m_cpu->reset();
 	m_lcd->reset();
+	/* lcd::reset clears sgb_color_active — re-apply after. */
+	if (m_sgb->enabled())
+		m_sgb->push_palettes();
 	m_apu->reset();
 	m_mbc->reset();
 
@@ -134,6 +143,36 @@ void gb::set_skip(int frame)
 	skip_buf=frame;
 }
 
+void gb::set_console_mode(int mode)
+{
+	console_mode=mode;
+}
+
+int gb::resolve_gb_type() const
+{
+	if (!m_rom->get_loaded())
+		return 1;
+	const byte *rom=m_rom->get_rom();
+	byte cgb=rom[0x143];
+	bool cgb_cart=(cgb&0x80)!=0;
+	bool cgb_only=(cgb&0xC0)==0xC0;
+
+	switch (console_mode){
+	case GB_CONSOLE_DMG:
+		return 1;
+	case GB_CONSOLE_CGB:
+		if (cgb_cart)
+			return use_gba?4:3;
+		return 1;
+	case GB_CONSOLE_SGB:
+		if (!cgb_only)
+			return 2;
+		return cgb_cart?(use_gba?4:3):1;
+	default:
+		return 1;
+	}
+}
+
 bool gb::load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent)
 {
 	if (m_rom->load_rom(buf,size,ram,ram_size, persistent))
@@ -154,6 +193,7 @@ void gb::serialize(serializer &s)
 	m_mbc->serialize(s);
 	m_lcd->serialize(s);
 	m_apu->serialize(s);
+	m_sgb->serialize(s);
 }
 
 size_t gb::get_state_size(void)
@@ -174,6 +214,9 @@ void gb::restore_state_mem(void *buf)
 {
 	serializer s(buf, serializer::LOAD_BUF);
 	serialize(s);
+	/* Remap SGB colours through the renderer after load. */
+	if (m_sgb && m_sgb->enabled() && m_sgb->has_palette())
+		m_sgb->push_palettes();
 }
 
 void gb::refresh_pal()
@@ -211,6 +254,8 @@ void gb::run()
 				if (m_cpu->dma_executing)
 					m_cpu->do_hdma_chunk();
 				if (regs.LY==144){
+					if (m_sgb)
+						m_sgb->on_new_frame();
 					/* Altered Space polls LY==144 with VBlank IE enabled; it must
 					 * observe LY before the ISR runs (handler is >1 line long).
 					 * One successful LDH+CP+JR ≈ 28 cycles — allow ~32.

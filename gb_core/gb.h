@@ -44,6 +44,7 @@ class mbc;
 #if CHEAT_CODES == 1
 class cheat;
 #endif
+class sgb;
 
 struct ext_hook{
 	byte (*send)(byte);
@@ -197,6 +198,11 @@ public:
 	void reset();
 	void set_skip(int frame);
 	void set_use_gba(bool use) { use_gba=use; }
+	/* GB_CONSOLE_DMG/CGB/SGB — applied on reset/load. */
+	void set_console_mode(int mode);
+	int get_console_mode() const { return console_mode; }
+	int resolve_gb_type() const;
+	sgb *get_sgb() { return m_sgb; }
 	bool load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent);
 
 	/* Evaluate STAT IRQ line (mode 0/1/2 + LYC OR'd). Rising edge => LCDC IF. */
@@ -226,6 +232,7 @@ private:
 	rom *m_rom;
 	mbc *m_mbc;
 	renderer *m_renderer;
+	sgb *m_sgb;
 
 #if CHEAT_CODES == 1
 	cheat *m_cheat;
@@ -247,6 +254,7 @@ private:
 
 	bool hook_ext;
 	bool use_gba;
+	int console_mode;
 
 	/* STAT IRQ line (OR of enabled mode/LYC sources). Rising edge => INT_LCDC. */
 	bool stat_irq_line;
@@ -312,6 +320,9 @@ public:
 	char get_palette_count();
 	char get_current_palette();
 	void set_palette(char index);
+	/* Apply SGB palettes 0 (BG) and 1 (OBJ) as RGB565 via map_color. */
+	void apply_sgb_palettes(const word pals[4][4]);
+	bool sgb_colors_active() const { return sgb_color_active; }
 	word get_blank_color();
 	void set_enable(int layer,bool enable);
 	bool get_enable(int layer);
@@ -335,6 +346,9 @@ private:
 
 	char cur_palette;
 	word m_pal16[4];
+	word m_obp_sgb[2][4]; /* OBJ0/OBJ1 when SGB palettes active */
+	word m_sgb_pal[4][4]; /* BG pals 0-3 when SGB ATTR active */
+	bool sgb_color_active;
 	word col_pal[16][4];
 	word mapped_pal[16][4];
 
