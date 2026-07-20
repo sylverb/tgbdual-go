@@ -1030,7 +1030,7 @@ void mbc::mmm01_write(word adr,byte dat)
 void mbc::serialize(serializer &s, int version)
 {
 	byte* sram = ref_gb->get_rom()->get_sram();
-
+	int cart = ref_gb->get_rom()->get_info()->cart_type;
 	int tmp;
 
 	s_VAR(current_bank); set_bank(current_bank);
@@ -1040,31 +1040,59 @@ void mbc::serialize(serializer &s, int version)
 
 	s_VAR(ext_is_ram);
 
-	/* Extra mapper state (was not in the original upstream format). */
-	s_VAR(mbc1_16_8);  s_VAR(mbc1_dat);
-	if (mbc1_multicart)
-		mbc1m_apply(true);
+	/*
+	 * v0: fixed blob of every mapper (legacy size).
+	 * v1+: only the active cart's mapper extras (payload size depends on ROM).
+	 */
+	if (version < GB_SAVESTATE_V1) {
+		s_VAR(mbc1_16_8);  s_VAR(mbc1_dat);
+		if (mbc1_multicart)
+			mbc1m_apply(true);
+		s_VAR(mbc3_latch); s_VAR(mbc3_sec);  s_VAR(mbc3_min); s_VAR(mbc3_hour);
+		s_VAR(mbc3_dayl);  s_VAR(mbc3_dayh); s_VAR(mbc3_timer);
+		s_VAR(mbc5_dat);
+		s_VAR(mbc7_write_enable);
+		s_VAR(mbc7_idle);  s_VAR(mbc7_cs);   s_VAR(mbc7_sk);  s_VAR(mbc7_op_code);
+		s_VAR(mbc7_adr);   s_VAR(mbc7_dat);  s_VAR(mbc7_ret); s_VAR(mbc7_state);
+		s_VAR(mbc7_buf);   s_VAR(mbc7_count);
+		s_VAR(huc1_16_8);  s_VAR(huc1_dat);
+		return;
+	}
 
-	s_VAR(mbc3_latch); s_VAR(mbc3_sec);  s_VAR(mbc3_min); s_VAR(mbc3_hour);
-	s_VAR(mbc3_dayl);  s_VAR(mbc3_dayh); s_VAR(mbc3_timer);
-
-	s_VAR(mbc5_dat);
-
-	s_VAR(mbc7_write_enable);
-	s_VAR(mbc7_idle);  s_VAR(mbc7_cs);   s_VAR(mbc7_sk);  s_VAR(mbc7_op_code);
-	s_VAR(mbc7_adr);   s_VAR(mbc7_dat);  s_VAR(mbc7_ret); s_VAR(mbc7_state);
-	s_VAR(mbc7_buf);   s_VAR(mbc7_count);
-
-	s_VAR(huc1_16_8);  s_VAR(huc1_dat);
-
-	if (version >= GB_SAVESTATE_V1) {
-		/* Protocol / mapper state only — calendar RTC tracks the host clock
-		 * (G&W wall time) and is re-synced after load, not restored here. */
+	switch (cart) {
+	case 1: case 2: case 3:
+	case 0x100: /* MMM01 reuses MBC1 banking mode bits */
+		s_VAR(mbc1_16_8); s_VAR(mbc1_dat);
+		if (mbc1_multicart)
+			mbc1m_apply(true);
+		break;
+	case 0x0F: case 0x10: case 0x11: case 0x12: case 0x13:
+		s_VAR(mbc3_latch); s_VAR(mbc3_sec);  s_VAR(mbc3_min); s_VAR(mbc3_hour);
+		s_VAR(mbc3_dayl);  s_VAR(mbc3_dayh); s_VAR(mbc3_timer);
+		break;
+	case 0x19: case 0x1A: case 0x1B: case 0x1C: case 0x1D: case 0x1E:
+		s_VAR(mbc5_dat);
+		break;
+	case 0x22:
+		s_VAR(mbc7_write_enable);
+		s_VAR(mbc7_idle);  s_VAR(mbc7_cs);   s_VAR(mbc7_sk);  s_VAR(mbc7_op_code);
+		s_VAR(mbc7_adr);   s_VAR(mbc7_dat);  s_VAR(mbc7_ret); s_VAR(mbc7_state);
+		s_VAR(mbc7_buf);   s_VAR(mbc7_count);
+		break;
+	case 0xFD:
+		/* Protocol only — calendar RTC is host-synced after load. */
 		s_VAR(tama5_ready); s_VAR(tama5_select); s_VAR(tama5_mode);
 		s_VAR(tama5_index); s_VAR(tama5_input); s_VAR(tama5_output);
 		s_VAR(tama5_rom_bank);
 		s_VAR(tama5_rtc_hour_mode);
 		s_VAR(tama5_rtc_test); s_VAR(tama5_rtc_index);
+		break;
+	case 0xFF:
+		s_VAR(huc1_16_8); s_VAR(huc1_dat);
+		break;
+	default:
+		/* ROM-only, MBC2, HuC3, … : banking lives in current_bank / state. */
+		break;
 	}
 }
 
