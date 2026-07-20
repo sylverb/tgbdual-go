@@ -64,6 +64,7 @@ gb::~gb()
 
 void gb::reset()
 {
+	regs.P1=0xCF; /* DMG/SGB boot value — required for SGB re-detection */
 	regs.SC=0;
 	regs.DIV=0;
 	regs.TIMA=0;
@@ -187,6 +188,7 @@ void gb::serialize(serializer &s)
 {
 	s_VAR(regs);
 	s_VAR(c_regs);
+	s_VAR(console_mode);
 
 	m_rom->serialize(s);
 	m_cpu->serialize(s);
