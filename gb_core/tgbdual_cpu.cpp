@@ -124,14 +124,18 @@ cpu::~cpu()
 #ifdef TARGET_GNW
 void cpu::init_ram()
 {
-	heap_itc_alloc(true);
-
-	if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
-		ram = (byte *)heap_alloc_mem(0x2000*4);
-		vram = (byte *)heap_alloc_mem(0x2000*2);
-	} else {
-		ram = (byte *)heap_alloc_mem(0x2000);
-		vram = (byte *)heap_alloc_mem(0x2000);
+	/* Allocate once. mbc::reset() calls this on every gb::reset(); re-allocating
+	 * would leak the bump heap
+	 */
+	if (ram == NULL) {
+		heap_itc_alloc(true);
+		if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
+			ram = (byte *)heap_alloc_mem(0x2000*4);
+			vram = (byte *)heap_alloc_mem(0x2000*2);
+		} else {
+			ram = (byte *)heap_alloc_mem(0x2000);
+			vram = (byte *)heap_alloc_mem(0x2000);
+		}
 	}
 	vram_bank=vram;
 	ram_bank=ram+0x1000;
