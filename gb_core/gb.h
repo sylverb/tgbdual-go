@@ -476,6 +476,9 @@ public:
 	void ext_write(word adr,byte dat);
 	void reset();
 
+	/* Refresh TAMA5 RTC registers from host wall-clock (G&W / libretro). */
+	void tama5_sync_rtc_from_host();
+
 	void serialize(serializer &s, int version = GB_SAVESTATE_V1);
 private:
 	void mbc1_write(word adr,byte dat);

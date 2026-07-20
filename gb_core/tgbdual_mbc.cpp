@@ -89,17 +89,10 @@ void mbc::reset()
 		tama5_input=0;
 		tama5_output=0;
 		tama5_rom_bank=1;
-		tama5_rtc_year=0;
-		tama5_rtc_month=1;
-		tama5_rtc_day=1;
-		tama5_rtc_hour=0;
-		tama5_rtc_minute=0;
-		tama5_rtc_second=0;
-		tama5_rtc_meridian=0;
-		tama5_rtc_leap=1;
 		tama5_rtc_hour_mode=1;
 		tama5_rtc_test=0;
 		tama5_rtc_index=0;
+		tama5_sync_rtc_from_host();
 		set_bank(1);
 	}
 }
@@ -839,6 +832,25 @@ void mbc::tama5_write(word adr,byte dat)
 	(void)adr;(void)dat;
 }
 
+void mbc::tama5_sync_rtc_from_host()
+{
+	if (!ref_gb->get_rom()->get_loaded() ||
+	    ref_gb->get_rom()->get_info()->cart_type!=0xFD)
+		return;
+
+	byte year=0,month=1,day=1,hour=0,minute=0,second=0;
+	ref_gb->get_renderer()->get_calendar_time(&year,&month,&day,&hour,&minute,&second);
+	tama5_rtc_year=year;
+	tama5_rtc_month=month;
+	tama5_rtc_day=day;
+	tama5_rtc_hour=hour;
+	tama5_rtc_minute=minute;
+	tama5_rtc_second=second;
+	tama5_rtc_meridian=(byte)(hour>=12);
+	/* 2-bit leap field used by the HLE; approximate from calendar year. */
+	tama5_rtc_leap=(byte)(((2000+year)%4==0)?1:0);
+}
+
 byte mbc::tama5_ext_read(word adr)
 {
 	/* Odd addresses are the select port (write-only). */
@@ -857,6 +869,9 @@ byte mbc::tama5_ext_read(word adr)
 
 	if (tama5_mode==2||tama5_mode==4){
 		if (tama5_select==0x0C||tama5_select==0x0D){
+			/* Fresh wall-clock sample at the start of each RTC nibble stream. */
+			if (tama5_rtc_index==0)
+				tama5_sync_rtc_from_host();
 			byte data=0;
 			switch(tama5_rtc_index){
 			case 0: data=(byte)(tama5_rtc_minute%10); break;
@@ -960,6 +975,7 @@ void mbc::tama5_ext_write(word adr,byte dat)
 		}
 		else if (tama5_mode==2&&tama5_index==0x06){
 			tama5_rtc_index=0;
+			tama5_sync_rtc_from_host();
 		}
 	}
 }
@@ -1042,12 +1058,12 @@ void mbc::serialize(serializer &s, int version)
 	s_VAR(huc1_16_8);  s_VAR(huc1_dat);
 
 	if (version >= GB_SAVESTATE_V1) {
+		/* Protocol / mapper state only — calendar RTC tracks the host clock
+		 * (G&W wall time) and is re-synced after load, not restored here. */
 		s_VAR(tama5_ready); s_VAR(tama5_select); s_VAR(tama5_mode);
 		s_VAR(tama5_index); s_VAR(tama5_input); s_VAR(tama5_output);
 		s_VAR(tama5_rom_bank);
-		s_VAR(tama5_rtc_year); s_VAR(tama5_rtc_month); s_VAR(tama5_rtc_day);
-		s_VAR(tama5_rtc_hour); s_VAR(tama5_rtc_minute); s_VAR(tama5_rtc_second);
-		s_VAR(tama5_rtc_meridian); s_VAR(tama5_rtc_leap); s_VAR(tama5_rtc_hour_mode);
+		s_VAR(tama5_rtc_hour_mode);
 		s_VAR(tama5_rtc_test); s_VAR(tama5_rtc_index);
 	}
 }

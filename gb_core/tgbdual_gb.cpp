@@ -255,6 +255,9 @@ bool gb::restore_state_mem(void *buf, int version)
 		m_sgb->push_palettes();
 	}
 
+	/* Tamagotchi RTC follows the host clock, never a frozen savestate stamp. */
+	m_mbc->tama5_sync_rtc_from_host();
+
 	return true;
 }
 

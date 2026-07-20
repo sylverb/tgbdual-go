@@ -45,6 +45,9 @@ public:
 
 	virtual byte get_time(int type)=0;
 	virtual void set_time(int type,byte dat)=0;
+	/* Wall-clock calendar (TAMA5 / Tamagotchi). year is 00-99. */
+	virtual void get_calendar_time(byte *year,byte *month,byte *day,
+	                               byte *hour,byte *minute,byte *second)=0;
 
 	virtual word get_sensor(bool x_y)=0;
 
