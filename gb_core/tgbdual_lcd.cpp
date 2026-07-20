@@ -955,9 +955,9 @@ void lcd::render(void *buf,int scanline)
 {
 	sprite_count=0;
 
-	/* SGB MASK_EN / border TRNs: don't show VRAM transfer bitpatterns.
-	 * FREEZE (and border holdoff) keep the previous frame — filling black
-	 * every masked frame caused a white/black blink when games toggle MASK. */
+	/* SGB MASK_EN / VRAM TRNs: don't show transfer bitpatterns.
+	 * FREEZE keeps the previous frame; BLACK/COLOR0 fill the GB window.
+	 * Border changes fade separately (pending buffer + animation). */
 	if (ref_gb->get_sgb() && ref_gb->get_sgb()->screen_blanked()) {
 		byte m = ref_gb->get_sgb()->mask_mode();
 		if (m == 2 || m == 3) {
@@ -968,7 +968,7 @@ void lcd::render(void *buf,int scanline)
 			for (int t = 0; t < 160; t++)
 				line[t] = fill;
 		}
-		/* m==1 FREEZE, or mask off with border/transfer holdoff: leave pixels. */
+		/* m==1 FREEZE, or mask off during VRAM transfer: leave pixels. */
 		return;
 	}
 

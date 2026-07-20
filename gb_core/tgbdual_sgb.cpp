@@ -26,6 +26,9 @@ enum {
 
 #define SGB_PACKET_BITS (16 * 8)
 
+/* Measured on SGB2 (SameBoy); may be off by ±2. */
+#define SGB_BORDER_FADE_FRAMES 105
+
 sgb::sgb(gb *ref)
 {
 	ref_gb = ref;
@@ -46,14 +49,14 @@ void sgb::reset()
 	vram_transfer_countdown = 0;
 	transfer_dest = TRN_NONE;
 	mask = MASK_OFF;
-	border_blank = 0;
+	border_animation = 0;
 	border_ready = false;
+	border_committed = false;
 	memset(ram_palettes, 0, sizeof(ram_palettes));
 	memset(attribute_files, 0, sizeof(attribute_files));
 	memset(attribute_map, 0, sizeof(attribute_map));
-	memset(border_tiles, 0, sizeof(border_tiles));
-	memset(border_map, 0, sizeof(border_map));
-	memset(border_pal, 0, sizeof(border_pal));
+	memset(&border, 0, sizeof(border));
+	memset(&pending_border, 0, sizeof(pending_border));
 	static const word def[4] = { 0x7FFF, 0x56B5, 0x294A, 0x0000 };
 	for (int p = 0; p < 4; p++)
 		for (int c = 0; c < 4; c++)
@@ -83,9 +86,36 @@ bool sgb::screen_blanked() const
 		return true;
 	if (vram_transfer_countdown != 0)
 		return true;
-	if (border_blank != 0)
+	/* Freeze GB LCD during border fade-out (keep last good frame). */
+	if (border_animation > 32)
 		return true;
 	return false;
+}
+
+word sgb::fade_rgb15(word color, byte fade)
+{
+	/* Saturating subtract per channel (SameBoy convert_rgb15_with_fade). */
+	byte r = (byte)((color) & 0x1F);
+	byte g = (byte)((color >> 5) & 0x1F);
+	byte b = (byte)((color >> 10) & 0x1F);
+	byte rd = (byte)(r - fade);
+	byte gd = (byte)(g - fade);
+	byte bd = (byte)(b - fade);
+	if (rd >= 0x20) rd = 0;
+	if (gd >= 0x20) gd = 0;
+	if (bd >= 0x20) bd = 0;
+	return (word)(rd | (gd << 5) | (bd << 10));
+}
+
+void sgb::tick_border_animation()
+{
+	if (border_animation == 0)
+		return;
+	border_animation--;
+	if (border_animation == 32) {
+		memcpy(&border, &pending_border, sizeof(border));
+		border_committed = true;
+	}
 }
 
 byte sgb::multipad_nibble() const
@@ -179,12 +209,10 @@ void sgb::command_ready()
 	case SGB_CHR_TRN:
 		vram_transfer_countdown = 3;
 		transfer_dest = (command[1] & 1) ? TRN_BORDER_HIGH : TRN_BORDER_LOW;
-		border_blank = 8;
 		break;
 	case SGB_PCT_TRN:
 		vram_transfer_countdown = 3;
 		transfer_dest = TRN_BORDER_MAP;
-		border_blank = 8;
 		break;
 	case SGB_ATTR_TRN:
 		vram_transfer_countdown = 3;
@@ -207,12 +235,11 @@ void sgb::on_new_frame()
 {
 	if (!active)
 		return;
-	if (border_blank)
-		border_blank--;
-	if (vram_transfer_countdown == 0)
-		return;
-	if (--vram_transfer_countdown == 0)
-		do_vram_transfer();
+	if (vram_transfer_countdown != 0) {
+		if (--vram_transfer_countdown == 0)
+			do_vram_transfer();
+	}
+	tick_border_animation();
 }
 
 void sgb::do_vram_transfer()
@@ -234,9 +261,9 @@ void sgb::do_vram_transfer()
 	else if (transfer_dest == TRN_BORDER_MAP)
 		ntiles = 0x88;
 	else if (transfer_dest == TRN_BORDER_LOW)
-		dest = (word *)border_tiles;
+		dest = (word *)pending_border.tiles;
 	else if (transfer_dest == TRN_BORDER_HIGH)
-		dest = (word *)border_tiles + 0x800;
+		dest = (word *)pending_border.tiles + 0x800;
 
 	word tmp[0x100 * 8];
 	word *out = dest ? dest : tmp;
@@ -262,8 +289,10 @@ void sgb::do_vram_transfer()
 		memcpy(attribute_files, tmp, sizeof(attribute_files));
 	else if (transfer_dest == TRN_BORDER_MAP) {
 		/* raw_data[0x440]: map[32*32] then palette[16*4] */
-		memcpy(border_map, tmp, sizeof(border_map));
-		memcpy(border_pal, tmp + 32 * 32, sizeof(border_pal));
+		memcpy(pending_border.map, tmp, sizeof(pending_border.map));
+		memcpy(pending_border.pal, tmp + 32 * 32, sizeof(pending_border.pal));
+		/* Start fade-out of the visible border, then swap at mid-fade. */
+		border_animation = SGB_BORDER_FADE_FRAMES;
 		border_ready = true;
 	}
 }
@@ -281,14 +310,37 @@ void sgb::blit_frame(word *lcd, int lcd_w, int lcd_h,
 
 	word color0 = ref_gb->get_renderer()->map_color(pal[0][0]);
 	word black = ref_gb->get_renderer()->map_color(0);
-	word mapped_border_pal[16 * 4];
-	for (unsigned i = 0; i < 16 * 4; i++)
-		mapped_border_pal[i] =
-			ref_gb->get_renderer()->map_color(border_pal[i]);
 
-	/* Only clear the margins outside the 256x224 SGB image. Inside it,
-	 * border tiles and the GB framebuffer overwrite every pixel once. */
+	/* Fade amount matches SameBoy after its per-frame decrement. */
+	byte fade = 0;
+	byte anim = border_animation;
+	if (anim != 0 && anim <= 64) {
+		if (anim > 32)
+			fade = (byte)(64 - anim);
+		else
+			fade = anim;
+	}
+
+	word mapped_border_pal[16 * 4];
+	for (unsigned i = 0; i < 16 * 4; i++) {
+		word c = border.pal[i];
+		if (fade)
+			c = fade_rgb15(c, fade);
+		mapped_border_pal[i] = ref_gb->get_renderer()->map_color(c);
+	}
+
+	/* Skip border tiles until the first PCT_TRN is committed, and during the
+	 * initial fade-out of an empty border (color0 defaults to white). */
+	bool draw_border = border_committed ||
+	                   (border_animation > 0 && border_animation < 32);
+
+	/* Margins outside the 256×224 SGB image. Cheap — only ~32+8 px strip. */
 	for (int y = 0; y < oy; y++) {
+		word *row = lcd + y * lcd_w;
+		for (int x = 0; x < lcd_w; x++)
+			row[x] = black;
+	}
+	for (int y = oy + SGB_BORDER_HEIGHT; y < lcd_h; y++) {
 		word *row = lcd + y * lcd_w;
 		for (int x = 0; x < lcd_w; x++)
 			row[x] = black;
@@ -300,21 +352,31 @@ void sgb::blit_frame(word *lcd, int lcd_w, int lcd_h,
 		for (int x = ox + SGB_BORDER_WIDTH; x < lcd_w; x++)
 			row[x] = black;
 	}
-	for (int y = oy + SGB_BORDER_HEIGHT; y < lcd_h; y++) {
-		word *row = lcd + y * lcd_w;
-		for (int x = 0; x < lcd_w; x++)
-			row[x] = black;
-	}
 
-	/* The 20x18 GB tile window is copied afterwards, so don't spend CPU
-	 * decoding the border underneath it. Decorative border overlap inside
-	 * the GB window is intentionally omitted in this embedded fast path. */
+	/* Before a border exists, fill the decorative ring black (not white).
+	 * Once tiles are drawn they overwrite every pixel — no full clear. */
+	if (!draw_border) {
+		for (int y = 0; y < SGB_BORDER_HEIGHT && (oy + y) < lcd_h; y++) {
+			/* Skip the GB window — filled below. */
+			int ty = y / 8;
+			word *row = lcd + (oy + y) * lcd_w + ox;
+			if (ty >= 5 && ty < 23) {
+				for (int x = 0; x < SGB_GB_X; x++)
+					row[x] = black;
+				for (int x = SGB_GB_X + gb_w; x < SGB_BORDER_WIDTH; x++)
+					row[x] = black;
+			} else {
+				for (int x = 0; x < SGB_BORDER_WIDTH; x++)
+					row[x] = black;
+			}
+		}
+	} else {
 	for (unsigned tile_y = 0; tile_y < 28; tile_y++) {
 		for (unsigned tile_x = 0; tile_x < 32; tile_x++) {
 			if (tile_x >= 6 && tile_x < 26 &&
 			    tile_y >= 5 && tile_y < 23)
 				continue;
-			word tile = border_map[tile_x + tile_y * 32];
+			word tile = border.map[tile_x + tile_y * 32];
 			byte flip_x = (tile & 0x4000) ? 0 : 7;
 			byte flip_y = (tile & 0x8000) ? 7 : 0;
 			byte pal_i = (byte)((tile >> 10) & 3);
@@ -331,23 +393,40 @@ void sgb::blit_frame(word *lcd, int lcd_w, int lcd_h,
 				unsigned base = tile_base + (unsigned)(y ^ flip_y) * 2;
 				for (unsigned x = 0; x < 8; x++) {
 					byte bit = (byte)(1 << (x ^ flip_x));
-					byte color = (byte)(((border_tiles[base] & bit) ? 1 : 0) |
-					                    ((border_tiles[base + 1] & bit) ? 2 : 0) |
-					                    ((border_tiles[base + 16] & bit) ? 4 : 0) |
-					                    ((border_tiles[base + 17] & bit) ? 8 : 0));
+					byte color = (byte)(((border.tiles[base] & bit) ? 1 : 0) |
+					                    ((border.tiles[base + 1] & bit) ? 2 : 0) |
+					                    ((border.tiles[base + 16] & bit) ? 4 : 0) |
+					                    ((border.tiles[base + 17] & bit) ? 8 : 0));
 					dst[x] = color ? mapped_border_pal[color + pal_i * 16]
 					               : color0;
 				}
 			}
 		}
 	}
+	}
 
-	/* Copy the already-colorized native GB frame into the SGB window. */
+	/* GB window. lcd::render freezes tgb_buffer while screen_blanked(), so
+	 * gb_rgb already holds the last good frame during MASK/TRN/fade-out. */
 	int gbx = ox + SGB_GB_X;
 	int gby = oy + SGB_GB_Y;
-	for (int y = 0; y < gb_h; y++)
-		memcpy(lcd + (gby + y) * lcd_w + gbx,
-		       gb_rgb + y * gb_w, (size_t)gb_w * sizeof(word));
+
+	if (mask == MASK_BLACK) {
+		for (int y = 0; y < gb_h; y++) {
+			word *row = lcd + (gby + y) * lcd_w + gbx;
+			for (int x = 0; x < gb_w; x++)
+				row[x] = black;
+		}
+	} else if (mask == MASK_COLOR0) {
+		for (int y = 0; y < gb_h; y++) {
+			word *row = lcd + (gby + y) * lcd_w + gbx;
+			for (int x = 0; x < gb_w; x++)
+				row[x] = color0;
+		}
+	} else {
+		for (int y = 0; y < gb_h; y++)
+			memcpy(lcd + (gby + y) * lcd_w + gbx,
+			       gb_rgb + y * gb_w, (size_t)gb_w * sizeof(word));
+	}
 }
 
 void sgb::joyp_write(byte value)
@@ -446,9 +525,13 @@ void sgb::serialize(serializer &s)
 	s_VAR(vram_transfer_countdown);
 	s_VAR(transfer_dest);
 	s_VAR(mask);
-	s_VAR(border_blank);
-	s_ARRAY(border_tiles);
-	s_ARRAY(border_map);
-	s_ARRAY(border_pal);
+	s_VAR(border_animation);
+	s_ARRAY(border.tiles);
+	s_ARRAY(border.map);
+	s_ARRAY(border.pal);
+	s_ARRAY(pending_border.tiles);
+	s_ARRAY(pending_border.map);
+	s_ARRAY(pending_border.pal);
 	s_VAR(border_ready);
+	s_VAR(border_committed);
 }

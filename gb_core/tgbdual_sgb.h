@@ -47,7 +47,7 @@ public:
 	byte mask_mode() const { return mask; }
 
 	/* True while live GB LCD must not update the framebuffer
-	 * (MASK_EN freeze/black/color0, or border TRN holdoff). */
+	 * (MASK_EN, VRAM TRN, or border fade-out). */
 	bool screen_blanked() const;
 
 	bool has_border() const { return border_ready; }
@@ -74,11 +74,20 @@ private:
 		TRN_BORDER_MAP = 5,
 	};
 
+	/* Visible border vs next border being transferred (SameBoy-style). */
+	struct border_gfx {
+		byte tiles[0x100 * 32];
+		word map[32 * 32];
+		word pal[16 * 4];
+	};
+
 	void command_ready();
 	void apply_pal_command(int first, int second);
 	void apply_pal_set();
 	void load_attribute_file(unsigned file_index);
 	void do_vram_transfer();
+	void tick_border_animation();
+	static word fade_rgb15(word color, byte fade);
 
 	gb *ref_gb;
 	bool active;
@@ -101,14 +110,18 @@ private:
 	byte vram_transfer_countdown;
 	byte transfer_dest;
 	byte mask;
-	/* Extra freeze frames after border TRNs (pattern still in VRAM). */
-	byte border_blank;
 
-	/* SNES 4bpp tiles (256 × 32 bytes) + map/palettes from PCT_TRN. */
-	byte border_tiles[0x100 * 32];
-	word border_map[32 * 32];
-	word border_pal[16 * 4];
+	/*
+	 * Border change fade (SameBoy / real SGB2): after PCT_TRN, countdown
+	 * from 105. Values >64 keep the old border; 64..33 fade it out; at 32
+	 * the pending border is committed; 31..1 fade the new one in.
+	 */
+	byte border_animation;
+	border_gfx border;
+	border_gfx pending_border;
 	bool border_ready;
+	/* True after the first pending→border swap at fade mid-point. */
+	bool border_committed;
 };
 
 #endif
