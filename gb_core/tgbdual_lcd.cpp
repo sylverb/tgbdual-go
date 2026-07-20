@@ -1015,16 +1015,23 @@ void lcd::render(void *buf,int scanline)
 	}
 }
 
-void lcd::serialize(serializer &s)
+void lcd::serialize(serializer &s, int version)
 {
-	/* Do not call set_palette() here — it clears SGB colors and was run on
-	 * SAVE as well as LOAD, so creating a savestate in SGB mode wiped the
-	 * live palette back to the DMG preset. */
 	s_VAR(cur_palette);
-	s_VAR(sgb_color_active);
-	s_ARRAY(m_pal16);
-	s_ARRAY(m_sgb_pal);
-	s_ARRAY(m_obp_sgb);
+	if (version >= GB_SAVESTATE_V1) {
+		/* Do not call set_palette() here — it clears SGB colors and was run on
+		 * SAVE as well as LOAD, so creating a savestate in SGB mode wiped the
+		 * live palette back to the DMG preset. */
+		s_VAR(sgb_color_active);
+		s_ARRAY(m_pal16);
+		s_ARRAY(m_sgb_pal);
+		s_ARRAY(m_obp_sgb);
+	} else {
+		/* v0: set_palette on load, then restore m_pal16 from the buffer. */
+		if (s.mode() == serializer::LOAD_BUF)
+			set_palette(cur_palette);
+		s_ARRAY(m_pal16);
+	}
 	s_ARRAY(col_pal); // the only one that was in the original state format.
 	s_ARRAY(mapped_pal);
 	s_VAR(trans_count);

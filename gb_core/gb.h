@@ -174,6 +174,14 @@ struct rom_info {
 	int gb_type;
 };
 
+/* Savestate blob layout versions.
+ * v0 = layout before tgbdual-go b1882f1 (no header on disk).
+ * v1 = current layout (on disk preceded by GBST header). */
+enum {
+	GB_SAVESTATE_V0 = 0,
+	GB_SAVESTATE_V1 = 1,
+};
+
 class gb
 {
 friend class cpu;
@@ -208,11 +216,14 @@ public:
 	/* Evaluate STAT IRQ line (mode 0/1/2 + LYC OR'd). Rising edge => LCDC IF. */
 	void update_stat_irq();
 
-	void serialize(serializer &s);
+	void serialize(serializer &s, int version = GB_SAVESTATE_V1);
 
-	size_t get_state_size(void);
+	size_t get_state_size(int version = GB_SAVESTATE_V1);
+	/* v0/v1 size for a temporary gb_type (DMG vs GBC WRAM/VRAM). */
+	size_t get_state_size_for_type(int version, int gb_type);
 	void save_state_mem(void *buf);
 	void restore_state_mem(void *buf);
+	bool restore_state_mem(void *buf, int version);
 
 	void refresh_pal();
 
@@ -334,7 +345,7 @@ public:
 	void on_bgp_write(byte dat);
 	bool end_mode3(void *buf,int scanline);
 
-	void serialize(serializer &s);
+	void serialize(serializer &s, int version = GB_SAVESTATE_V1);
 private:
 	void bg_render(void *buf,int scanline);
 	void win_render(void *buf,int scanline);
@@ -465,7 +476,7 @@ public:
 	void ext_write(word adr,byte dat);
 	void reset();
 
-	void serialize(serializer &s);
+	void serialize(serializer &s, int version = GB_SAVESTATE_V1);
 private:
 	void mbc1_write(word adr,byte dat);
 	void mbc1m_apply(bool update_bank0);

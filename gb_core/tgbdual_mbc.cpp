@@ -1011,7 +1011,7 @@ void mbc::mmm01_write(word adr,byte dat)
 	}
 }
 
-void mbc::serialize(serializer &s)
+void mbc::serialize(serializer &s, int version)
 {
 	byte* sram = ref_gb->get_rom()->get_sram();
 
@@ -1024,7 +1024,7 @@ void mbc::serialize(serializer &s)
 
 	s_VAR(ext_is_ram);
 
-	// all of the below were originally not in the save state format.
+	/* Extra mapper state (was not in the original upstream format). */
 	s_VAR(mbc1_16_8);  s_VAR(mbc1_dat);
 	if (mbc1_multicart)
 		mbc1m_apply(true);
@@ -1041,12 +1041,14 @@ void mbc::serialize(serializer &s)
 
 	s_VAR(huc1_16_8);  s_VAR(huc1_dat);
 
-	s_VAR(tama5_ready); s_VAR(tama5_select); s_VAR(tama5_mode);
-	s_VAR(tama5_index); s_VAR(tama5_input); s_VAR(tama5_output);
-	s_VAR(tama5_rom_bank);
-	s_VAR(tama5_rtc_year); s_VAR(tama5_rtc_month); s_VAR(tama5_rtc_day);
-	s_VAR(tama5_rtc_hour); s_VAR(tama5_rtc_minute); s_VAR(tama5_rtc_second);
-	s_VAR(tama5_rtc_meridian); s_VAR(tama5_rtc_leap); s_VAR(tama5_rtc_hour_mode);
-	s_VAR(tama5_rtc_test); s_VAR(tama5_rtc_index);
+	if (version >= GB_SAVESTATE_V1) {
+		s_VAR(tama5_ready); s_VAR(tama5_select); s_VAR(tama5_mode);
+		s_VAR(tama5_index); s_VAR(tama5_input); s_VAR(tama5_output);
+		s_VAR(tama5_rom_bank);
+		s_VAR(tama5_rtc_year); s_VAR(tama5_rtc_month); s_VAR(tama5_rtc_day);
+		s_VAR(tama5_rtc_hour); s_VAR(tama5_rtc_minute); s_VAR(tama5_rtc_second);
+		s_VAR(tama5_rtc_meridian); s_VAR(tama5_rtc_leap); s_VAR(tama5_rtc_hour_mode);
+		s_VAR(tama5_rtc_test); s_VAR(tama5_rtc_index);
+	}
 }
 

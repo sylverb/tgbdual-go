@@ -184,41 +184,78 @@ bool gb::load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent)
    return false;
 }
 
-void gb::serialize(serializer &s)
+void gb::serialize(serializer &s, int version)
 {
 	s_VAR(regs);
 	s_VAR(c_regs);
-	s_VAR(console_mode);
+	if (version >= GB_SAVESTATE_V1)
+		s_VAR(console_mode);
 
 	m_rom->serialize(s);
 	m_cpu->serialize(s);
-	m_mbc->serialize(s);
-	m_lcd->serialize(s);
+	m_mbc->serialize(s, version);
+	m_lcd->serialize(s, version);
 	m_apu->serialize(s);
-	m_sgb->serialize(s);
+	if (version >= GB_SAVESTATE_V1)
+		m_sgb->serialize(s);
 }
 
-size_t gb::get_state_size(void)
+size_t gb::get_state_size(int version)
 {
+	return get_state_size_for_type(version, m_rom->get_info()->gb_type);
+}
+
+size_t gb::get_state_size_for_type(int version, int gb_type)
+{
+	rom_info *info = m_rom->get_info();
+	int old = info->gb_type;
+	info->gb_type = gb_type;
+
 	size_t ret = 0;
 	serializer s(&ret, serializer::COUNT);
-	serialize(s);
+	serialize(s, version);
+
+	info->gb_type = old;
 	return ret;
 }
 
 void gb::save_state_mem(void *buf)
 {
 	serializer s(buf, serializer::SAVE_BUF);
-	serialize(s);
+	serialize(s, GB_SAVESTATE_V1);
 }
 
 void gb::restore_state_mem(void *buf)
 {
+	restore_state_mem(buf, GB_SAVESTATE_V1);
+}
+
+bool gb::restore_state_mem(void *buf, int version)
+{
+	if (version != GB_SAVESTATE_V0 && version != GB_SAVESTATE_V1)
+		return false;
+
 	serializer s(buf, serializer::LOAD_BUF);
-	serialize(s);
-	/* Remap SGB colours through the renderer after load. */
-	if (m_sgb && m_sgb->enabled() && m_sgb->has_palette())
+	serialize(s, version);
+
+	if (version == GB_SAVESTATE_V0) {
+		/* v0 has no SGB blob — ensure HLE stays disabled. */
+		if (m_sgb)
+			m_sgb->set_enabled(false);
+
+		/* console_mode was not in the file; derive it from restored gb_type. */
+		int t = m_rom->get_info()->gb_type;
+		if (t == 2)
+			console_mode = GB_CONSOLE_SGB;
+		else if (t >= 3)
+			console_mode = GB_CONSOLE_CGB;
+		else
+			console_mode = GB_CONSOLE_DMG;
+	} else if (m_sgb && m_sgb->enabled() && m_sgb->has_palette()) {
 		m_sgb->push_palettes();
+	}
+
+	return true;
 }
 
 void gb::refresh_pal()
