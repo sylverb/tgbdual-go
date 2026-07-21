@@ -196,7 +196,8 @@ void gb::serialize(serializer &s, int version)
 	m_mbc->serialize(s, version);
 	m_lcd->serialize(s, version);
 	m_apu->serialize(s);
-	if (version >= GB_SAVESTATE_V1)
+	/* SGB HLE blob (~29 KiB) only when running as SGB — omit for DMG/CGB. */
+	if (version >= GB_SAVESTATE_V1 && console_mode == GB_CONSOLE_SGB)
 		m_sgb->serialize(s);
 }
 
@@ -209,13 +210,24 @@ size_t gb::get_state_size_for_type(int version, int gb_type)
 {
 	rom_info *info = m_rom->get_info();
 	int old = info->gb_type;
+	int old_mode = console_mode;
 	info->gb_type = gb_type;
+	/* COUNT must mirror serialize()'s SGB gate (console_mode == SGB). */
+	if (version >= GB_SAVESTATE_V1) {
+		if (gb_type == 2)
+			console_mode = GB_CONSOLE_SGB;
+		else if (gb_type >= 3)
+			console_mode = GB_CONSOLE_CGB;
+		else
+			console_mode = GB_CONSOLE_DMG;
+	}
 
 	size_t ret = 0;
 	serializer s(&ret, serializer::COUNT);
 	serialize(s, version);
 
 	info->gb_type = old;
+	console_mode = old_mode;
 	return ret;
 }
 
@@ -251,6 +263,10 @@ bool gb::restore_state_mem(void *buf, int version)
 			console_mode = GB_CONSOLE_CGB;
 		else
 			console_mode = GB_CONSOLE_DMG;
+	} else if (console_mode != GB_CONSOLE_SGB) {
+		/* v1 non-SGB saves omit the blob — drop any leftover HLE state. */
+		if (m_sgb)
+			m_sgb->set_enabled(false);
 	} else if (m_sgb && m_sgb->enabled() && m_sgb->has_palette()) {
 		m_sgb->push_palettes();
 	}

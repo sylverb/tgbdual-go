@@ -176,7 +176,8 @@ struct rom_info {
 
 /* Savestate blob layout versions.
  * v0 = layout before tgbdual-go b1882f1 (no header on disk).
- * v1 = current layout (on disk preceded by GBST header). */
+ * v1 = current layout (on disk preceded by GBST header).
+ *     SGB HLE state is included only when console_mode is SGB. */
 enum {
 	GB_SAVESTATE_V0 = 0,
 	GB_SAVESTATE_V1 = 1,
