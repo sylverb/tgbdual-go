@@ -204,7 +204,7 @@ case 0xF9: REG_SP=REG_HL;break; //LD SP,HL : 11 111 001 :state 6
 case 0xC5: REG_SP-=2;writew(REG_SP,REG_BC);break; //PUSH BC
 case 0xD5: REG_SP-=2;writew(REG_SP,REG_DE);break; //PUSH DE
 case 0xE5: REG_SP-=2;writew(REG_SP,REG_HL);break; //PUSH HL
-case 0xF5: write(REG_SP-2,z802gb[REG_F]|0xe);write(REG_SP-1,REG_A);REG_SP-=2;break; //PUSH AF // 未使用ビットは1になるみたい(メタルギアより)
+case 0xF5: write(REG_SP-2,z802gb[REG_F]);write(REG_SP-1,REG_A);REG_SP-=2;break; //PUSH AF
 
 //POP rq : 11 rq0 001 : state 10 (12?)
 case 0xC1: REG_B=read(REG_SP+1);REG_C=read(REG_SP);REG_SP+=2;break; //POP BC
