@@ -44,6 +44,7 @@ class mbc;
 #if CHEAT_CODES == 1
 class cheat;
 #endif
+class sgb;
 
 struct ext_hook{
 	byte (*send)(byte);
@@ -173,6 +174,15 @@ struct rom_info {
 	int gb_type;
 };
 
+/* Savestate blob layout versions.
+ * v0 = layout before tgbdual-go b1882f1 (no header on disk).
+ * v1 = current layout (on disk preceded by GBST header).
+ *     SGB HLE state is included only when console_mode is SGB. */
+enum {
+	GB_SAVESTATE_V0 = 0,
+	GB_SAVESTATE_V1 = 1,
+};
+
 class gb
 {
 friend class cpu;
@@ -197,13 +207,21 @@ public:
 	void reset();
 	void set_skip(int frame);
 	void set_use_gba(bool use) { use_gba=use; }
+	/* GB_CONSOLE_DMG/CGB/SGB — applied on reset/load. */
+	void set_console_mode(int mode);
+	int get_console_mode() const { return console_mode; }
+	int resolve_gb_type() const;
+	sgb *get_sgb() { return m_sgb; }
 	bool load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent);
 
-	void serialize(serializer &s);
+	void serialize(serializer &s, int version = GB_SAVESTATE_V1);
 
-	size_t get_state_size(void);
+	size_t get_state_size(int version = GB_SAVESTATE_V1);
+	/* v0/v1 size for a temporary gb_type (DMG vs GBC WRAM/VRAM). */
+	size_t get_state_size_for_type(int version, int gb_type);
 	void save_state_mem(void *buf);
 	void restore_state_mem(void *buf);
+	bool restore_state_mem(void *buf, int version);
 
 	void refresh_pal();
 
@@ -219,6 +237,7 @@ private:
 	rom *m_rom;
 	mbc *m_mbc;
 	renderer *m_renderer;
+	sgb *m_sgb;
 
 #if CHEAT_CODES == 1
 	cheat *m_cheat;
@@ -240,6 +259,7 @@ private:
 
 	bool hook_ext;
 	bool use_gba;
+	int console_mode;
 };
 
 #if CHEAT_CODES == 1
@@ -302,13 +322,16 @@ public:
 	char get_palette_count();
 	char get_current_palette();
 	void set_palette(char index);
+	/* Apply SGB palettes 0 (BG) and 1 (OBJ) as RGB565 via map_color. */
+	void apply_sgb_palettes(const word pals[4][4]);
+	bool sgb_colors_active() const { return sgb_color_active; }
 	word get_blank_color();
 	void set_enable(int layer,bool enable);
 	bool get_enable(int layer);
 
 	int get_sprite_count() { return sprite_count; };
 
-	void serialize(serializer &s);
+	void serialize(serializer &s, int version = GB_SAVESTATE_V1);
 private:
 	void bg_render(void *buf,int scanline);
 	void win_render(void *buf,int scanline);
@@ -319,6 +342,9 @@ private:
 
 	char cur_palette;
 	word m_pal16[4];
+	word m_obp_sgb[2][4]; /* OBJ0/OBJ1 when SGB palettes active */
+	word m_sgb_pal[4][4]; /* BG pals 0-3 when SGB ATTR active */
+	bool sgb_color_active;
 	word col_pal[16][4];
 	word mapped_pal[16][4];
 
@@ -428,7 +454,7 @@ public:
 	void ext_write(word adr,byte dat);
 	void reset();
 
-	void serialize(serializer &s);
+	void serialize(serializer &s, int version = GB_SAVESTATE_V1);
 private:
 	void mbc1_write(word adr,byte dat);
 	void mbc2_write(word adr,byte dat);

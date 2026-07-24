@@ -22,6 +22,7 @@
 // Interface with external / other unit emulation GB
 
 #include "gb.h"
+#include "tgbdual_sgb.h"
 #include <stdlib.h>
 
 gb::gb(renderer *ref,bool b_lcd,bool b_apu)
@@ -33,6 +34,8 @@ gb::gb(renderer *ref,bool b_lcd,bool b_apu)
 	m_apu=new apu(this);// ROMより後に作られたし // I was made ​​later than the ROM
 	m_mbc=new mbc(this);
 	m_cpu=new cpu(this);
+	m_sgb=new sgb(this);
+	console_mode=GB_CONSOLE_DMG;
 #if CHEAT_CODES == 1
 	m_cheat=new cheat(this);
 #endif
@@ -51,6 +54,7 @@ gb::~gb()
 {
 	m_renderer->set_sound_renderer(NULL);
 
+	delete m_sgb;
 	delete m_mbc;
 	delete m_rom;
 	delete m_apu;
@@ -60,6 +64,7 @@ gb::~gb()
 
 void gb::reset()
 {
+	regs.P1=0xCF; /* DMG/SGB boot value — required for SGB re-detection */
 	regs.SC=0;
 	regs.DIV=0;
 	regs.TIMA=0;
@@ -82,10 +87,15 @@ void gb::reset()
 	memset(&c_regs,0,sizeof(c_regs));
 
 	if (m_rom->get_loaded())
-		m_rom->get_info()->gb_type=(m_rom->get_rom()[0x143]&0x80)?(use_gba?4:3):1;
+		m_rom->get_info()->gb_type=resolve_gb_type();
 
+	m_sgb->reset();
+	m_sgb->set_enabled(m_rom->get_loaded() && m_rom->get_info()->gb_type==2);
 	m_cpu->reset();
 	m_lcd->reset();
+	/* lcd::reset clears sgb_color_active — re-apply after. */
+	if (m_sgb->enabled())
+		m_sgb->push_palettes();
 	m_apu->reset();
 	m_mbc->reset();
 
@@ -110,6 +120,36 @@ void gb::set_skip(int frame)
 	skip_buf=frame;
 }
 
+void gb::set_console_mode(int mode)
+{
+	console_mode=mode;
+}
+
+int gb::resolve_gb_type() const
+{
+	if (!m_rom->get_loaded())
+		return 1;
+	const byte *rom=m_rom->get_rom();
+	byte cgb=rom[0x143];
+	bool cgb_cart=(cgb&0x80)!=0;
+	bool cgb_only=(cgb&0xC0)==0xC0;
+
+	switch (console_mode){
+	case GB_CONSOLE_DMG:
+		return 1;
+	case GB_CONSOLE_CGB:
+		if (cgb_cart)
+			return use_gba?4:3;
+		return 1;
+	case GB_CONSOLE_SGB:
+		if (!cgb_only)
+			return 2;
+		return cgb_cart?(use_gba?4:3):1;
+	default:
+		return 1;
+	}
+}
+
 bool gb::load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent)
 {
 	if (m_rom->load_rom(buf,size,ram,ram_size, persistent))
@@ -120,36 +160,94 @@ bool gb::load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent)
    return false;
 }
 
-void gb::serialize(serializer &s)
+void gb::serialize(serializer &s, int version)
 {
 	s_VAR(regs);
 	s_VAR(c_regs);
+	if (version >= GB_SAVESTATE_V1)
+		s_VAR(console_mode);
 
 	m_rom->serialize(s);
 	m_cpu->serialize(s);
-	m_mbc->serialize(s);
-	m_lcd->serialize(s);
+	m_mbc->serialize(s, version);
+	m_lcd->serialize(s, version);
 	m_apu->serialize(s);
+	/* SGB HLE blob (~29 KiB) only when running as SGB — omit for DMG/CGB. */
+	if (version >= GB_SAVESTATE_V1 && console_mode == GB_CONSOLE_SGB)
+		m_sgb->serialize(s);
 }
 
-size_t gb::get_state_size(void)
+size_t gb::get_state_size(int version)
 {
+	return get_state_size_for_type(version, m_rom->get_info()->gb_type);
+}
+
+size_t gb::get_state_size_for_type(int version, int gb_type)
+{
+	rom_info *info = m_rom->get_info();
+	int old = info->gb_type;
+	int old_mode = console_mode;
+	info->gb_type = gb_type;
+	/* COUNT must mirror serialize()'s SGB gate (console_mode == SGB). */
+	if (version >= GB_SAVESTATE_V1) {
+		if (gb_type == 2)
+			console_mode = GB_CONSOLE_SGB;
+		else if (gb_type >= 3)
+			console_mode = GB_CONSOLE_CGB;
+		else
+			console_mode = GB_CONSOLE_DMG;
+	}
+
 	size_t ret = 0;
 	serializer s(&ret, serializer::COUNT);
-	serialize(s);
+	serialize(s, version);
+
+	info->gb_type = old;
+	console_mode = old_mode;
 	return ret;
 }
 
 void gb::save_state_mem(void *buf)
 {
 	serializer s(buf, serializer::SAVE_BUF);
-	serialize(s);
+	serialize(s, GB_SAVESTATE_V1);
 }
 
 void gb::restore_state_mem(void *buf)
 {
+	restore_state_mem(buf, GB_SAVESTATE_V1);
+}
+
+bool gb::restore_state_mem(void *buf, int version)
+{
+	if (version != GB_SAVESTATE_V0 && version != GB_SAVESTATE_V1)
+		return false;
+
 	serializer s(buf, serializer::LOAD_BUF);
-	serialize(s);
+	serialize(s, version);
+
+	if (version == GB_SAVESTATE_V0) {
+		/* v0 has no SGB blob — ensure HLE stays disabled. */
+		if (m_sgb)
+			m_sgb->set_enabled(false);
+
+		/* console_mode was not in the file; derive it from restored gb_type. */
+		int t = m_rom->get_info()->gb_type;
+		if (t == 2)
+			console_mode = GB_CONSOLE_SGB;
+		else if (t >= 3)
+			console_mode = GB_CONSOLE_CGB;
+		else
+			console_mode = GB_CONSOLE_DMG;
+	} else if (console_mode != GB_CONSOLE_SGB) {
+		/* v1 non-SGB saves omit the blob — drop any leftover HLE state. */
+		if (m_sgb)
+			m_sgb->set_enabled(false);
+	} else if (m_sgb && m_sgb->enabled() && m_sgb->has_palette()) {
+		m_sgb->push_palettes();
+	}
+
+	return true;
 }
 
 void gb::refresh_pal()
@@ -174,6 +272,8 @@ void gb::run()
 				m_renderer->refresh();
 				if (now_frame>=skip){
 					m_renderer->render_screen((byte*)vframe,160,144,16);
+					if (m_sgb)
+						m_sgb->on_new_frame();
 					now_frame=0;
 				}
 				else
@@ -291,6 +391,8 @@ void gb::run()
 				m_renderer->refresh();
 				if (now_frame>=skip){
 					m_renderer->render_screen((byte*)vframe,160,144,16);
+					if (m_sgb)
+						m_sgb->on_new_frame();
 					now_frame=0;
 				}
 				else

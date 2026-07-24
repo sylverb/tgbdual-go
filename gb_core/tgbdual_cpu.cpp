@@ -22,6 +22,7 @@
 // CPU emulation unit (I/O, IRQ, etc.)
 
 #include "gb.h"
+#include "tgbdual_sgb.h"
 #include <string.h>
 #ifdef TARGET_GNW
 #include "gw_malloc.h"
@@ -57,14 +58,15 @@ cpu::~cpu()
 #ifdef TARGET_GNW
 void cpu::init_ram()
 {
-	heap_itc_alloc(true);
-
-	if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
-		ram = (byte *)heap_alloc_mem(0x2000*4);
-		vram = (byte *)heap_alloc_mem(0x2000*2);
-	} else {
-		ram = (byte *)heap_alloc_mem(0x2000);
-		vram = (byte *)heap_alloc_mem(0x2000);
+	if (ram == NULL) {
+		heap_itc_alloc(true);
+		if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
+			ram = (byte *)heap_alloc_mem(0x2000*4);
+			vram = (byte *)heap_alloc_mem(0x2000*2);
+		} else {
+			ram = (byte *)heap_alloc_mem(0x2000);
+			vram = (byte *)heap_alloc_mem(0x2000);
+		}
 	}
 	vram_bank=vram;
 	ram_bank=ram+0x1000;
@@ -265,6 +267,10 @@ byte cpu::io_read(word adr)
 		case 2:
 			return 0xE0|((tmp&0x80?0:1)|(tmp&0x40?0:2)|(tmp&0x20?0:4)|(tmp&0x10?0:8));
 		case 3:
+			/* SGB multipad: low nibble = player id; keep written select bits. */
+			if (ref_gb->get_sgb()&&ref_gb->get_sgb()->enabled())
+				return (byte)((ref_gb->get_regs()->P1&0xF0)|
+				              ref_gb->get_sgb()->multipad_nibble());
 			return 0xFF;
 		}
 		return 0x00;
@@ -413,6 +419,8 @@ void cpu::io_write(word adr,byte dat)
 {
 		switch(adr){
 		case 0xFF00://P1(パッド制御) // P1 (control pad)
+			if (ref_gb->get_sgb())
+				ref_gb->get_sgb()->joyp_write(dat);
 			ref_gb->get_regs()->P1=dat;
 			return;
 		case 0xFF01://SB(シリアルシリアル通信送受信) // SB (sending and receiving serial communication)
