@@ -102,6 +102,23 @@ void gb::reset()
 	now_frame=0;
 	skip=skip_buf=0;
 	re_render=0;
+	stat_irq_line=false;
+}
+
+void gb::update_stat_irq()
+{
+	/* STAT interrupt line = OR of all enabled sources that are currently active.
+	 * IRQ fires only on rising edge (STAT blocking / Altered Space / SF2). */
+	byte st=regs.STAT;
+	byte mode=st&0x03;
+	bool line=false;
+	if ((st&0x08)&&mode==0) line=true;           /* HBlank */
+	if ((st&0x10)&&mode==1) line=true;           /* VBlank mode */
+	if ((st&0x20)&&mode==2) line=true;           /* OAM search */
+	if ((st&0x40)&&(st&0x04)) line=true;         /* LYC=LY */
+	if (line&&!stat_irq_line)
+		m_cpu->irq(INT_LCDC);
+	stat_irq_line=line;
 }
 
 void gb::hook_extport(ext_hook *ext)
@@ -263,11 +280,10 @@ void gb::run()
 			regs.LY=(regs.LY+1)%154;
 
 			regs.STAT&=0xF8;
-			if (regs.LYC==regs.LY){
+			if (regs.LYC==regs.LY)
 				regs.STAT|=4;
-				if (regs.STAT&0x40)
-					m_cpu->irq(INT_LCDC);
-			}
+			update_stat_irq();
+
 			if (regs.LY==0){
 				m_renderer->refresh();
 				if (now_frame>=skip){
@@ -282,13 +298,15 @@ void gb::run()
 				skip=skip_buf;
 			}
 			if (regs.LY>=144){ // VBlank 期間中 // During VBlank
-				regs.STAT|=1;
+				regs.STAT=(regs.STAT&0xFC)|1;
+				update_stat_irq();
 				if (regs.LY==144){
-					m_cpu->exec(72);
+					/* Street Fighter 2 / Altered Space: leave a short window so
+					 * games can poll LY==144 before the VBlank ISR runs.
+					 * Full line must stay 456 cycles (old path was 448). */
+					m_cpu->exec(32);
 					m_cpu->irq(INT_VBLANK);
-					if (regs.STAT&0x10)
-						m_cpu->irq(INT_LCDC);
-					m_cpu->exec(456-80);
+					m_cpu->exec(456-32);
 				}
 				else if (regs.LY==153){
 					m_cpu->exec(80);
@@ -302,11 +320,11 @@ void gb::run()
 					m_cpu->exec(456);
 			}
 			else{ // VBlank 期間外 // Period outside VBlank
-				regs.STAT|=2;
-				if (regs.STAT&0x20)
-					m_cpu->irq(INT_LCDC);
+				regs.STAT=(regs.STAT&0xFC)|2;
+				update_stat_irq();
 				m_cpu->exec(80); // state=2
 				regs.STAT|=3;
+				update_stat_irq(); /* mode 3: usually drops STAT line */
 				m_cpu->exec(169); // state=3
 
 				if (m_cpu->dma_executing){ // HBlank DMA
@@ -345,6 +363,7 @@ void gb::run()
 						m_lcd->render(vframe,regs.LY);
 
 					regs.STAT&=0xfc;
+					update_stat_irq();
 					m_cpu->exec(207); // state=3
 				}
 				else{
@@ -372,8 +391,7 @@ void gb::run()
 */						regs.STAT&=0xfc;
 						if (now_frame>=skip)
 							m_lcd->render(vframe,regs.LY);
-						if ((regs.STAT&0x08))
-							m_cpu->irq(INT_LCDC);
+						update_stat_irq();
 						m_cpu->exec(207); // state=0
 //					}
 				}
@@ -401,6 +419,7 @@ void gb::run()
 				re_render=0;
 			}
 			regs.STAT&=0xF8;
+			update_stat_irq();
 			m_cpu->exec(456);
 		}
 	}

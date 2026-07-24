@@ -214,6 +214,9 @@ public:
 	sgb *get_sgb() { return m_sgb; }
 	bool load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent);
 
+	/* Evaluate STAT IRQ line (mode 0/1/2 + LYC OR'd). Rising edge => LCDC IF. */
+	void update_stat_irq();
+
 	void serialize(serializer &s, int version = GB_SAVESTATE_V1);
 
 	size_t get_state_size(int version = GB_SAVESTATE_V1);
@@ -260,6 +263,9 @@ private:
 	bool hook_ext;
 	bool use_gba;
 	int console_mode;
+
+	/* STAT IRQ line (OR of enabled mode/LYC sources). Rising edge => INT_LCDC. */
+	bool stat_irq_line;
 };
 
 #if CHEAT_CODES == 1

@@ -471,14 +471,17 @@ void cpu::io_write(word adr,byte dat)
 //			fprintf(file,"LCDC=%02X at line %d\n",dat,ref_gb->get_regs()->LY);
 			return;
 		case 0xFF41://STAT(LCDステータス) // STAT (LCD status)
-			if (ref_gb->get_rom()->get_info()->gb_type==1)
-				// オリジナルGBにおいてこのような現象が起こるらしい
-				// This phenomenon seems to occur in the original GB
-				if (!(ref_gb->get_regs()->STAT&0x02))
-					ref_gb->get_regs()->IF|=INT_LCDC;
-
-			ref_gb->get_regs()->STAT=(ref_gb->get_regs()->STAT&0x7)|(dat&0x78);
+		{
+			byte old=ref_gb->get_regs()->STAT;
+			ref_gb->get_regs()->STAT=(old&0x07)|(dat&0x78);
+			/* DMG STAT write quirk: writing STAT can raise the STAT line
+			 * even when enabling a source that is already active. Force a
+			 * falling edge first so update_stat_irq sees a rise (Legend of Zerd). */
+			if (ref_gb->get_rom()->get_info()->gb_type<3)
+				ref_gb->stat_irq_line=false;
+			ref_gb->update_stat_irq();
 			return;
+		}
 		case 0xFF42://SCY(スクロールY) // SCY (scroll Y)
 			ref_gb->get_regs()->SCY=dat;
 			return;
@@ -491,6 +494,11 @@ void cpu::io_write(word adr,byte dat)
 			return;
 		case 0xFF45://LYC(LY比較) // LYC (compare LY)
 			ref_gb->get_regs()->LYC=dat;
+			if (ref_gb->get_regs()->LYC==ref_gb->get_regs()->LY)
+				ref_gb->get_regs()->STAT|=0x04;
+			else
+				ref_gb->get_regs()->STAT&=(byte)~0x04;
+			ref_gb->update_stat_irq();
 			return;
 		case 0xFF46://DMA(DMA転送) // DMA (DMA transfer)
 			switch(dat>>5){
