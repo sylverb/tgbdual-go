@@ -463,9 +463,23 @@ void cpu::io_write(word adr,byte dat)
 			ref_gb->get_regs()->IF=dat;
 			return;
 		case 0xFF40://LCDC(LCDコントロール) // LCDC (LCD control)
-			if ((dat&0x80)&&(!(ref_gb->get_regs()->LCDC&0x80))){
+			/* LCD off: LY=0, mode 0, but do NOT recompare LYC (freeze coincidence).
+			 * Mr. Do turns the LCD off at LY==LYC then waits on STAT again; clearing
+			 * the coincidence flag here softlocks that wait. */
+			if (!(dat&0x80)&&(ref_gb->get_regs()->LCDC&0x80)){
+				ref_gb->get_regs()->LY=0;
+				ref_gb->get_regs()->STAT&=0xFC; /* mode 0, keep LYC flag */
+				ref_gb->stat_irq_line=false;
+				ref_gb->get_lcd()->clear_win_count();
+			}
+			else if ((dat&0x80)&&(!(ref_gb->get_regs()->LCDC&0x80))){
 				ref_gb->get_regs()->LY=0;
 				ref_gb->get_lcd()->clear_win_count();
+				if (ref_gb->get_regs()->LYC==0)
+					ref_gb->get_regs()->STAT|=0x04;
+				else
+					ref_gb->get_regs()->STAT&=(byte)~0x04;
+				ref_gb->update_stat_irq();
 			}
 			ref_gb->get_regs()->LCDC=dat;
 //			fprintf(file,"LCDC=%02X at line %d\n",dat,ref_gb->get_regs()->LY);
@@ -494,11 +508,14 @@ void cpu::io_write(word adr,byte dat)
 			return;
 		case 0xFF45://LYC(LY比較) // LYC (compare LY)
 			ref_gb->get_regs()->LYC=dat;
-			if (ref_gb->get_regs()->LYC==ref_gb->get_regs()->LY)
-				ref_gb->get_regs()->STAT|=0x04;
-			else
-				ref_gb->get_regs()->STAT&=(byte)~0x04;
-			ref_gb->update_stat_irq();
+			/* While LCD is off, LY/LYC coincidence is frozen (Mr. Do). */
+			if (ref_gb->get_regs()->LCDC&0x80){
+				if (ref_gb->get_regs()->LYC==ref_gb->get_regs()->LY)
+					ref_gb->get_regs()->STAT|=0x04;
+				else
+					ref_gb->get_regs()->STAT&=(byte)~0x04;
+				ref_gb->update_stat_irq();
+			}
 			return;
 		case 0xFF46://DMA(DMA転送) // DMA (DMA transfer)
 			switch(dat>>5){
