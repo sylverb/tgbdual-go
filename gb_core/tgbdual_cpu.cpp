@@ -34,6 +34,66 @@
 #define N_FLAG 0x02
 #define C_FLAG 0x01
 
+/* DIV bit selected by TAC clock select (falling edge clocks TIMA). */
+static const int tac_div_shift[4] = {9, 3, 5, 7};
+
+void cpu::timer_inc_tima()
+{
+	ref_gb->get_regs()->TIMA++;
+	if (!ref_gb->get_regs()->TIMA) {
+		irq(INT_TIMER);
+		ref_gb->get_regs()->TIMA = ref_gb->get_regs()->TMA;
+	}
+}
+
+/* Advance the 16-bit DIV counter; clock TIMA on (enable & bit) 1->0 edges.
+ * O(1) edge count (gambatte/SameBoy style) — no per-edge walk of `cycles`. */
+void cpu::timer_advance(int cycles)
+{
+	if (cycles <= 0)
+		return;
+
+	byte tac = ref_gb->get_regs()->TAC;
+	unsigned old_div = (unsigned)div_clock & 0xffff;
+	unsigned end = old_div + (unsigned)cycles;
+
+	div_clock = (int)(end & 0xffff);
+	ref_gb->get_regs()->DIV = (div_clock >> 8) & 0xff;
+
+	if (!(tac & 0x04))
+		return;
+
+	unsigned period = 1u << (tac_div_shift[tac & 3] + 1); /* 1024, 16, 64, 256 */
+	/* Multiples of `period` in (old_div, end] == falling edges of bit N. */
+	unsigned ticks = (end / period) - (old_div / period);
+	while (ticks--)
+		timer_inc_tima();
+}
+
+void cpu::timer_on_tac_write(byte new_tac)
+{
+	byte old_tac = ref_gb->get_regs()->TAC;
+	unsigned old_mask = 1u << tac_div_shift[old_tac & 3];
+	unsigned new_mask = 1u << tac_div_shift[new_tac & 3];
+	bool old_sig = (old_tac & 0x04) && ((div_clock & old_mask) != 0);
+	bool new_sig = (new_tac & 0x04) && ((div_clock & new_mask) != 0);
+	if (old_sig && !new_sig)
+		timer_inc_tima();
+	ref_gb->get_regs()->TAC = new_tac;
+}
+
+void cpu::timer_on_div_write()
+{
+	byte tac = ref_gb->get_regs()->TAC;
+	unsigned mask = 1u << tac_div_shift[tac & 3];
+	bool old_sig = (tac & 0x04) && ((div_clock & mask) != 0);
+	div_clock = 0;
+	ref_gb->get_regs()->DIV = 0;
+	/* Clearing DIV while the AND result was high is a falling edge. */
+	if (old_sig)
+		timer_inc_tima();
+}
+
 cpu::cpu(gb *ref)
 {
 	ref_gb=ref;
@@ -459,7 +519,8 @@ void cpu::io_write(word adr,byte dat)
 			}
 			return;
 		case 0xFF04://DIV(ディバイダー) // DIV (divider)
-			ref_gb->get_regs()->DIV=0;
+			/* Writing DIV resets the 16-bit divider (falling-edge may tick TIMA). */
+			timer_on_div_write();
 			return;
 		case 0xFF05://TIMA(タイマカウンタ) // TIMA (timer counter)
 			ref_gb->get_regs()->TIMA=dat;
@@ -470,9 +531,8 @@ void cpu::io_write(word adr,byte dat)
 //			sys_clock=0;
 			return;
 		case 0xFF07://TAC(タイマコントロール) // TAC (timer control)
-			if ((dat&0x04)&&!(ref_gb->get_regs()->TAC&0x04))
-				sys_clock=0;
-			ref_gb->get_regs()->TAC=dat;
+			/* Enable/clock changes can produce a falling edge on the TIMA input. */
+			timer_on_tac_write(dat);
 			return;
 		case 0xFF0F://IF(割りこみフラグ) // IF (Interrupt flag)
 			ref_gb->get_regs()->IF=dat;
@@ -1001,23 +1061,20 @@ void cpu::exec(int clocks)
 	int tmp_clocks;
 	byte tmpb;
 	pare_reg tmp;
-	static const int timer_clocks[]={1024,16,64,256};
 
 	rest_clock+=clocks;
 
 	if (gdma_rest){
 		if (rest_clock<=gdma_rest){
 			gdma_rest-=rest_clock;
-			sys_clock+=rest_clock;
-			div_clock+=rest_clock;
 			total_clock+=rest_clock;
+			timer_advance(rest_clock);
 			rest_clock=0;
 		}
 		else{
 			rest_clock-=gdma_rest;
-			sys_clock+=gdma_rest;
-			div_clock+=gdma_rest;
 			total_clock+=gdma_rest;
+			timer_advance(gdma_rest);
 			gdma_rest=0;
 		}
 	}
@@ -1044,25 +1101,8 @@ void cpu::exec(int clocks)
 		}
 
 		rest_clock-=tmp_clocks;
-		div_clock+=tmp_clocks;
 		total_clock+=tmp_clocks;
-
-		if (ref_gb->get_regs()->TAC&0x04){//タイマ割りこみ // Timer interrupt
-			sys_clock+=tmp_clocks;
-			if (sys_clock>timer_clocks[ref_gb->get_regs()->TAC&0x03]){
-				sys_clock&=timer_clocks[ref_gb->get_regs()->TAC&0x03]-1;
-				ref_gb->get_regs()->TIMA++;
-				if (!ref_gb->get_regs()->TIMA){
-					irq(INT_TIMER);
-					ref_gb->get_regs()->TIMA=ref_gb->get_regs()->TMA;
-				}
-			}
-		}
-
-		if (div_clock&0x100){
-			ref_gb->get_regs()->DIV-=div_clock>>8;
-			div_clock&=0xff;
-		}
+		timer_advance(tmp_clocks);
 
 		if (total_clock>seri_occer){
 			seri_occer=0x7fffffff;
