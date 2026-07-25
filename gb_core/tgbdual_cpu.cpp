@@ -75,10 +75,25 @@ void cpu::init_ram()
 
 void cpu::reset()
 {
-	regs.AF.w=(ref_gb->get_rom()->get_info()->gb_type>=3)?0x11b0:0x01b0;
-	regs.BC.w=(ref_gb->get_rom()->get_info()->gb_type>=4)?0x0113:0x0013;
-	regs.DE.w=0x00D8;
-	regs.HL.w=0x014D;
+	/* Post-boot registers per Pan Docs. Asteroids (ModRetro Chromatic) checks
+	 * D!=0 to accept CGB; DMG DE=$00D8 leaves D=0 and the cart freezes in HALT. */
+	if (ref_gb->get_rom()->get_info()->gb_type >= 4) {
+		/* AGB as CGB */
+		regs.AF.w = 0x1100;
+		regs.BC.w = 0x0100;
+		regs.DE.w = 0x0008;
+		regs.HL.w = 0x000D;
+	} else if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
+		regs.AF.w = 0x1180;
+		regs.BC.w = 0x0000;
+		regs.DE.w = 0xFF56;
+		regs.HL.w = 0x000D;
+	} else {
+		regs.AF.w = 0x01B0;
+		regs.BC.w = 0x0013;
+		regs.DE.w = 0x00D8;
+		regs.HL.w = 0x014D;
+	}
 	regs.I=0;
 	regs.SP=0xFFFE;
 	regs.PC=0x100;
