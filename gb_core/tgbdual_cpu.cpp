@@ -556,7 +556,12 @@ void cpu::io_write(word adr,byte dat)
 					ref_gb->get_regs()->STAT&=(byte)~0x04;
 				ref_gb->update_stat_irq();
 			}
+			/* CGB: clearing WIN resets the WY latch (Pan Docs). */
+			if (ref_gb->get_rom()->get_info()->gb_type>=3 &&
+			    (ref_gb->get_regs()->LCDC&0x20) && !(dat&0x20))
+				ref_gb->get_lcd()->reset_wy_trigger();
 			ref_gb->get_regs()->LCDC=dat;
+			ref_gb->get_lcd()->check_wy_trigger();
 //			fprintf(file,"LCDC=%02X at line %d\n",dat,ref_gb->get_regs()->LY);
 			return;
 		case 0xFF41://STAT(LCDステータス) // STAT (LCD status)
@@ -635,6 +640,7 @@ void cpu::io_write(word adr,byte dat)
 			return;
 		case 0xFF4A://WY(ウインドウY座標) // WY (window coordinates Y)
 			ref_gb->get_regs()->WY=dat;
+			ref_gb->get_lcd()->check_wy_trigger();
 			return;
 		case 0xFF4B://WX(ウインドウX座標) // WX (window coordinates X)
 			ref_gb->get_regs()->WX=dat;

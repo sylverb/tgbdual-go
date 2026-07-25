@@ -321,7 +321,10 @@ public:
 
 	void render(void *buf,int scanline);
 	void reset();
-	void clear_win_count() { now_win_line=9; }
+	void clear_win_count() { now_win_line=9; wy_triggered=false; }
+	/* Latch WY when WIN is enabled and LY==WY (SameBoy / mGBA #409). */
+	void check_wy_trigger();
+	void reset_wy_trigger() { wy_triggered=false; }
 	word *get_pal(int num) { return col_pal[num]; }
 	word *get_mapped_pal(int num) { return mapped_pal[num]; }
 
@@ -364,6 +367,7 @@ private:
 	byte trans_tbl[160+160],priority_tbl[320];
 
 	int now_win_line;
+	bool wy_triggered;
 	int mul;
 	int sprite_count;
 

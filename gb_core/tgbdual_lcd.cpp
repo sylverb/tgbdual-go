@@ -102,6 +102,16 @@ word lcd::get_blank_color()
 	return m_pal16[ref_gb->get_regs()->BGP & 0x3];
 }
 
+void lcd::check_wy_trigger()
+{
+	/* Window Y condition latches only when WIN is on and LY==WY.
+	 * Enabling WIN after LY has already passed WY must not show the
+	 * window (mGBA #409 / Warriors of Might and Magic). */
+	if ((ref_gb->get_regs()->LCDC&0x20) &&
+	    ref_gb->get_regs()->WY==ref_gb->get_regs()->LY)
+		wy_triggered=true;
+}
+
 void lcd::set_enable(int layer,bool enable)
 {
 	layer_enable[layer]=enable;
@@ -116,6 +126,7 @@ void lcd::reset()
 {
 	sgb_color_active=false;
 	now_win_line=0;
+	wy_triggered=false;
 	layer_enable[0]=layer_enable[1]=layer_enable[2]=true;
 	sprite_count=0;
 	mode3_ly=0;
@@ -128,6 +139,7 @@ void lcd::reset()
 
 void lcd::begin_mode3(void *buf,int scanline)
 {
+	check_wy_trigger();
 	mode3_ly=scanline;
 	mode3_x=0;
 	mode3_indexed=false;
@@ -219,8 +231,13 @@ void lcd::bg_render(void *buf,int scanline)
 	word pal[4];
 	byte tile;
 
+	/* WX<8 => window starts at X<=0 and covers the line — but only if the
+	 * WY latch is set (not merely WY<=LY). */
+	bool win_covers = (wy_triggered&&
+	                   ref_gb->get_regs()->WX<8&&
+	                   (ref_gb->get_regs()->LCDC&0x20));
 	if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x01)||
-		(ref_gb->get_regs()->WY<=(dword)scanline&&ref_gb->get_regs()->WX<8&&(ref_gb->get_regs()->LCDC&0x20)))
+		win_covers)
 	{
 		if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x01))
 		{
@@ -375,7 +392,7 @@ void lcd::bg_render(void *buf,int scanline)
 
 void lcd::win_render(void *buf,int scanline)
 {
-	if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x20)||ref_gb->get_regs()->WY>=(scanline+1)||ref_gb->get_regs()->WX>166){
+	if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x20)||!wy_triggered||ref_gb->get_regs()->WX>166){
 //		if ((ref_gb->get_regs()->WY>=(scanline+1))&&((ref_gb->get_regs()->LCDC&0x21)!=0x21))
 //			memset(((word*)buf)+160*scanline,0,160*2);
 		return;
@@ -392,13 +409,15 @@ void lcd::win_render(void *buf,int scanline)
 	word *dat=(word*)buf;
 	byte tile;
 	int i;
+	/* WX 0..6: start at X=0 (gbe-plus / Star Wars Episode I Racer). */
+	int win_x=(ref_gb->get_regs()->WX<7)?0:(ref_gb->get_regs()->WX-7);
 
 	pal[0]=m_pal16[ref_gb->get_regs()->BGP&0x3];
 	pal[1]=m_pal16[(ref_gb->get_regs()->BGP>>2)&0x3];
 	pal[2]=m_pal16[(ref_gb->get_regs()->BGP>>4)&0x3];
 	pal[3]=m_pal16[(ref_gb->get_regs()->BGP>>6)&0x3];
-	dat+=160*scanline+ref_gb->get_regs()->WX-7;
-	trans+=ref_gb->get_regs()->WX-7;
+	dat+=160*scanline+win_x;
+	trans+=win_x;
 	byte *now_tile=ref_gb->get_cpu()->get_vram()+back+(((y>>3)-1)<<5);
 	word *now_share=(word*)(ref_gb->get_cpu()->get_vram()+share+((y&7)<<1));
 	word *now_pat=(word*)(ref_gb->get_cpu()->get_vram()+pat+((y&7)<<1));
@@ -412,7 +431,7 @@ void lcd::win_render(void *buf,int scanline)
 	int sgb_row = 0;
 	word sgb_bgp = 0;
 	int sgb_pi = -1;
-	int sgb_sx = ref_gb->get_regs()->WX - 7;
+	int sgb_sx = win_x;
 	if (sgb_color_active) {
 		sgb_am = ref_gb->get_sgb()->attr_map();
 		int aty = scanline >> 3;
@@ -421,7 +440,7 @@ void lcd::win_render(void *buf,int scanline)
 		sgb_bgp = ref_gb->get_regs()->BGP;
 	}
 
-	for (i=ref_gb->get_regs()->WX>>3;i<21;i++){
+	for (i=win_x>>3;i<21;i++){
 		tile=*(now_tile++);
 		if (sgb_color_active) {
 			int atx = sgb_sx >> 3;
@@ -610,10 +629,14 @@ void lcd::bg_render_color(void *buf,int scanline)
 	word share=0x0000;//prefix
 	trans_count=0;
 
+	/* See bg_render(): use WY latch, not WY<=LY. */
+	bool win_covers = (wy_triggered&&
+	                   ref_gb->get_regs()->WX<8&&
+	                   (ref_gb->get_regs()->LCDC&0x20));
 	// カラーではOFF機能が働かない?(僕のキャンプ場､モンコレナイト)
 	// OFF function does not work in color? (my campsite, Moncolle Night)
 	if (!(ref_gb->get_regs()->LCDC&0x80)/*||!(ref_gb->get_regs()->LCDC&0x01)*/||
-		(ref_gb->get_regs()->WY<=(dword)scanline&&ref_gb->get_regs()->WX<8&&(ref_gb->get_regs()->LCDC&0x20))){
+		win_covers){
 		if (!(ref_gb->get_regs()->LCDC&0x80)/*||!(ref_gb->get_regs()->LCDC&0x01)*/){
 			word *tmp_w=(word*)buf+160*scanline;
 			word tmp_dat=get_blank_color();
@@ -770,7 +793,7 @@ void lcd::bg_render_color(void *buf,int scanline)
 
 void lcd::win_render_color(void *buf,int scanline)
 {
-	if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x20)||ref_gb->get_regs()->WY>=(scanline+1)||ref_gb->get_regs()->WX>166){
+	if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x20)||!wy_triggered||ref_gb->get_regs()->WX>166){
 //		if ((ref_gb->get_regs()->WY>=(scanline+1))&&((ref_gb->get_regs()->LCDC&0x21)!=0x21))
 //			memset(((word*)buf)+160*scanline,0,160*2);
 		return;
@@ -790,10 +813,12 @@ void lcd::win_render_color(void *buf,int scanline)
 	byte *priority=priority_tbl;
 	byte tile;
 	int i;
+	/* WX 0..6: start at X=0 (gbe-plus / Star Wars Episode I Racer). */
+	int win_x=(ref_gb->get_regs()->WX<7)?0:(ref_gb->get_regs()->WX-7);
 
-	dat+=160*scanline+ref_gb->get_regs()->WX-7;
-	trans+=ref_gb->get_regs()->WX-7;
-	priority+=ref_gb->get_regs()->WX-7;
+	dat+=160*scanline+win_x;
+	trans+=win_x;
+	priority+=win_x;
 	byte *now_tile=ref_gb->get_cpu()->get_vram()+back+(((y>>3)-1)<<5);
 	byte *now_atr=ref_gb->get_cpu()->get_vram()+back+(((y>>3)-1)<<5)+0x2000;
 	word *now_share=(word*)(ref_gb->get_cpu()->get_vram()+share+((y&7)<<1));
@@ -805,7 +830,7 @@ void lcd::win_render_color(void *buf,int scanline)
 	byte atr;
 	word bank;
 
-	for (i=ref_gb->get_regs()->WX>>3;i<21;i++){
+	for (i=win_x>>3;i<21;i++){
 		tile=*(now_tile++);
 		atr=*(now_atr++);
 		bank=(atr<<9)&0x1000;
@@ -969,6 +994,7 @@ void lcd::sprite_render_color(void *buf,int scanline)
 void lcd::render(void *buf,int scanline)
 {
 	sprite_count=0;
+	check_wy_trigger();
 
 	/* SGB MASK_EN / VRAM TRNs: don't show transfer bitpatterns.
 	 * FREEZE keeps the previous frame; BLACK/COLOR0 fill the GB window.
@@ -1058,6 +1084,9 @@ void lcd::serialize(serializer &s, int version)
 	s_ARRAY(trans_tbl);
 	s_ARRAY(priority_tbl);
 	s_VAR(now_win_line);
+	/* wy_triggered not in savestate blob; infer from window line counter. */
+	if (s.mode()==serializer::LOAD_BUF)
+		wy_triggered=(now_win_line!=9);
 	s_VAR(mul);
 	s_VAR(sprite_count);
 	s_ARRAY(layer_enable);
