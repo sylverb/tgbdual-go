@@ -337,6 +337,11 @@ public:
 
 	int get_sprite_count() { return sprite_count; };
 
+	/* Mid-scanline BGP (Prehistorik Man intro). DMG only; uses cpu total_clock. */
+	void begin_mode3(void *buf,int scanline);
+	void on_bgp_write(byte dat);
+	bool end_mode3(void *buf,int scanline);
+
 	void serialize(serializer &s, int version = GB_SAVESTATE_V1);
 private:
 	void bg_render(void *buf,int scanline);
@@ -345,6 +350,7 @@ private:
 	void bg_render_color(void *buf,int scanline);
 	void win_render_color(void *buf,int scanline);
 	void sprite_render_color(void *buf,int scanline);
+	void apply_bgp_range(void *buf,int scanline,int x0,int x1);
 
 	char cur_palette;
 	word m_pal16[4];
@@ -362,6 +368,14 @@ private:
 	int sprite_count;
 
 	bool layer_enable[3];
+
+	/* Mid-line BGP state (active only while mode3_buf != NULL). */
+	int mode3_ly;
+	int mode3_x;
+	int mode3_base; /* cpu total_clock at begin_mode3 */
+	bool mode3_indexed;
+	bool mode3_used;
+	void *mode3_buf;
 
 	gb *ref_gb;
 };

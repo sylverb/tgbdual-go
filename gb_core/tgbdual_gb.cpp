@@ -322,6 +322,14 @@ void gb::run()
 			else{ // VBlank 期間外 // Period outside VBlank
 				regs.STAT=(regs.STAT&0xFC)|2;
 				update_stat_irq();
+
+				/* Mid-scanline BGP tracking (Prehistorik Man). DMG/SGB only —
+				 * CGB has no BGP mid-line effect we care about. Timing via
+				 * cpu::total_clock snapshot (no per-op cost in exec). */
+				bool track_bgp=m_rom->get_info()->gb_type<3;
+				if (track_bgp)
+					m_lcd->begin_mode3((now_frame>=skip)?(void*)vframe:NULL,regs.LY);
+
 				m_cpu->exec(80); // state=2
 				regs.STAT|=3;
 				update_stat_irq(); /* mode 3: usually drops STAT line */
@@ -359,8 +367,12 @@ void gb::run()
 //					m_cpu->div_clock+=207*(m_cpu->speed?2:1);
 //					regs.STAT|=3;
 
-					if (now_frame>=skip)
-						m_lcd->render(vframe,regs.LY);
+					if (now_frame>=skip){
+						if (!track_bgp||!m_lcd->end_mode3(vframe,regs.LY))
+							m_lcd->render(vframe,regs.LY);
+					}
+					else if (track_bgp)
+						m_lcd->end_mode3(NULL,regs.LY);
 
 					regs.STAT&=0xfc;
 					update_stat_irq();
@@ -389,8 +401,12 @@ void gb::run()
 					}
 					else{
 */						regs.STAT&=0xfc;
-						if (now_frame>=skip)
-							m_lcd->render(vframe,regs.LY);
+						if (now_frame>=skip){
+							if (!track_bgp||!m_lcd->end_mode3(vframe,regs.LY))
+								m_lcd->render(vframe,regs.LY);
+						}
+						else if (track_bgp)
+							m_lcd->end_mode3(NULL,regs.LY);
 						update_stat_irq();
 						m_cpu->exec(207); // state=0
 //					}

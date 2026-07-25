@@ -533,7 +533,7 @@ void cpu::io_write(word adr,byte dat)
 			}
 			return;
 		case 0xFF47://BGP(背景パレット) // BGP (background palette)
-			ref_gb->get_regs()->BGP=dat;
+			ref_gb->get_lcd()->on_bgp_write(dat);
 			return;
 		case 0xFF48://OBP1(オブジェクトパレット1) // OBP1 (object palette 1)
 			ref_gb->get_regs()->OBP1=dat;
