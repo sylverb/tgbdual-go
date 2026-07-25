@@ -587,6 +587,11 @@ void cpu::io_write(word adr,byte dat)
 			speed_change=dat&1;
 			return;
 		case 0xFF4F://VBK(内部VRAMバンク切り替え) // VBK (VRAM internal bank switching)
+			/* DMG/SGB: register does not exist (gnuboy ignores these writes).
+			 * Applying the bank switch with only 8 KiB VRAM allocated hardfaults
+			 * (Patchy Matchy v1.1: DMG header but still pokes VBK). */
+			if (ref_gb->get_rom()->get_info()->gb_type < 3)
+				return;
 			vram_bank=vram+0x2000*(dat&0x01);
 			ref_gb->get_cregs()->VBK=dat;//&0x01;
 			return;
@@ -749,6 +754,8 @@ void cpu::io_write(word adr,byte dat)
 //			if (dma_executing)
 //				return;
 
+			if (ref_gb->get_rom()->get_info()->gb_type < 3)
+				return;
 			dat=(!(dat&7))?1:(dat&7);
 			ref_gb->get_cregs()->SVBK=dat;
 			ram_bank=ram+0x1000*dat;
