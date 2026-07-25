@@ -477,6 +477,9 @@ public:
 	void serialize(serializer &s, int version = GB_SAVESTATE_V1);
 private:
 	void mbc1_write(word adr,byte dat);
+	void mbc1m_write(word adr,byte dat);
+	void mbc1m_apply(bool update_bank0);
+	bool detect_mbc1m();
 	void mbc2_write(word adr,byte dat);
 	void mbc3_write(word adr,byte dat);
 	void mbc5_write(word adr,byte dat);
@@ -492,6 +495,7 @@ private:
 	int  current_bank;
 	bool mbc1_16_8;
 	byte mbc1_dat;
+	bool mbc1_multicart; /* MBC1M (MK I&II, Bomberman Collection, …) — set once at reset */
 
 	byte mbc3_latch; // 1 bits
 	byte mbc3_sec; // 6

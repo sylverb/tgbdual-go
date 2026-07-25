@@ -22,6 +22,7 @@
 // MBC emulation unit (MBC1/2/3/5/7,HuC-1,MMM01,Rumble,RTC,Motion-Sensor,etc...)
 
 #include "gb.h"
+#include <string.h>
 
 extern "C" {
 #include <odroid_system.h>
@@ -62,6 +63,7 @@ void mbc::reset()
 
 	mbc1_16_8=true;
 	mbc1_dat=0;
+	mbc1_multicart=detect_mbc1m();
 	ext_is_ram=true;
 
 	mbc7_adr=0;
@@ -94,7 +96,11 @@ void mbc::write(word adr,byte dat)
 	case 1:
 	case 2:
 	case 3:
-		mbc1_write(adr,dat);
+		/* Separate handler so normal MBC1 pays no multicart branch. */
+		if (mbc1_multicart)
+			mbc1m_write(adr,dat);
+		else
+			mbc1_write(adr,dat);
 		break;
 	case 5:
 	case 6:
@@ -506,6 +512,70 @@ void mbc::set_bank(int bank)
 static int rom_size_tbl[]={2,4,8,16,32,64,128,256,512};
 static int ram_size_tbl[]={0,1,1,4,16,8};
 
+/* MBC1M: secondary bank bits map to ROM A18-A17 (banks $10/$20/$30), not A19-A18.
+ * Matches gambatte Mbc1Multi64 / Pan Docs. */
+static inline unsigned mbc1m_bank(unsigned rombank)
+{
+	return ((rombank >> 1) & 0x30) | (rombank & 0x0F);
+}
+
+static inline unsigned mbc1_adj_bank(unsigned bank)
+{
+	return (bank & 0x1F) ? bank : (bank | 1);
+}
+
+bool mbc::detect_mbc1m()
+{
+	rom_info *info=ref_gb->get_rom()->get_info();
+	if (info->cart_type<1||info->cart_type>3)
+		return false;
+	byte *dat=ref_gb->get_rom()->get_rom();
+	if (!dat||info->rom_file_size<(int)(0x11*BANK_SIZE))
+		return false;
+	/* Pan Docs: MBC1M carts have a Nintendo logo/header in bank $10. */
+	return memcmp(dat+0x104,dat+0x10*BANK_SIZE+0x104,0x30)==0;
+}
+
+void mbc::mbc1m_apply(bool update_bank0)
+{
+	int mask=rom_size_tbl[ref_gb->get_rom()->get_info()->rom_size]-1;
+	byte *base=ref_gb->get_rom()->get_rom();
+
+	if (!mbc1_16_8){ /* mode 1: game select remaps bank0 + high banks */
+		unsigned rb=mbc1m_bank(mbc1_dat);
+		if (update_bank0)
+			rom_bank0=base+((rb&0x30)&mask)*BANK_SIZE;
+		set_bank(mbc1_adj_bank(rb)&mask);
+	}
+	else{ /* mode 0: bank0 fixed at 0; full rombank like normal MBC1 */
+		if (update_bank0)
+			rom_bank0=base;
+		set_bank(mbc1_adj_bank(mbc1_dat)&mask);
+	}
+}
+
+void mbc::mbc1m_write(word adr,byte dat)
+{
+	/* gambatte Mbc1Multi64 — only reached when mbc1_multicart was detected. */
+	switch(adr>>13&3){
+	case 0:
+		break;
+	case 1:
+		mbc1_dat=(mbc1_dat&0x60)|(dat&0x1F);
+		/* Low-bank write does not remappoint bank0 (gambatte). */
+		mbc1m_apply(false);
+		break;
+	case 2:
+		mbc1_dat=((dat<<5)&0x60)|(mbc1_dat&0x1F);
+		mbc1m_apply(true);
+		break;
+	case 3:
+		mbc1_16_8=!(dat&1);
+		mbc1m_apply(true);
+		break;
+	}
+}
+
 void mbc::mbc1_write(word adr,byte dat)
 {
 	if (mbc1_16_8){//16/8モード
@@ -823,6 +893,8 @@ void mbc::serialize(serializer &s, int version)
 	 */
 	if (version < GB_SAVESTATE_V1) {
 		s_VAR(mbc1_16_8);  s_VAR(mbc1_dat);
+		if (mbc1_multicart)
+			mbc1m_apply(true);
 		s_VAR(mbc3_latch); s_VAR(mbc3_sec);  s_VAR(mbc3_min); s_VAR(mbc3_hour);
 		s_VAR(mbc3_dayl);  s_VAR(mbc3_dayh); s_VAR(mbc3_timer);
 		s_VAR(mbc5_dat);
@@ -838,6 +910,8 @@ void mbc::serialize(serializer &s, int version)
 	case 1: case 2: case 3:
 	case 0x100: /* MMM01 reuses MBC1 banking mode bits */
 		s_VAR(mbc1_16_8); s_VAR(mbc1_dat);
+		if (mbc1_multicart)
+			mbc1m_apply(true);
 		break;
 	case 0x0F: case 0x10: case 0x11: case 0x12: case 0x13:
 		s_VAR(mbc3_latch); s_VAR(mbc3_sec);  s_VAR(mbc3_min); s_VAR(mbc3_hour);
