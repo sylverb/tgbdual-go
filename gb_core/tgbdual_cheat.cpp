@@ -26,24 +26,29 @@
 cheat::cheat(gb *ref)
 {
 	ref_gb=ref;
-	cheat_list.clear();
-#ifndef TARGET_GNW
-	create_cheat_map();
-#else
+#ifdef TARGET_GNW
+	cheat_list_count = 0;
 	upper_adr = 0x0000;
 	lower_adr = 0xffff;
+#else
+	cheat_list.clear();
+	create_cheat_map();
 #endif
 }
 
 cheat::~cheat()
 {
+#ifndef TARGET_GNW
 	cheat_list.clear();
+#endif
 }
 
 void cheat::clear()
 {
+#ifdef TARGET_GNW
+	cheat_list_count = 0;
+#else
 	cheat_list.clear();
-#ifndef TARGET_GNW
 	create_cheat_map();
 #endif
 }
@@ -54,14 +59,16 @@ void cheat::add_cheat(cheat_dat *dat)
 	if (dat->code==0)
 		ref_gb->get_cpu()->write(dat->adr,dat->dat);
 	else{
-		cheat_list.push_back(*dat);
-#ifndef TARGET_GNW
-		create_cheat_map();
-#else
+#ifdef TARGET_GNW
+		if (cheat_list_count < GNW_MAX_CHEAT_ENTRIES)
+			cheat_list_storage[cheat_list_count++] = *dat;
 		if (dat->adr > upper_adr)
 			upper_adr = dat->adr;
 		if (dat->adr < lower_adr)
 			lower_adr = dat->adr;
+#else
+		cheat_list.push_back(*dat);
+		create_cheat_map();
 #endif
 	}
 }
@@ -150,12 +157,8 @@ bool cheat::has_cheat(word adr) {
 	if ((adr > upper_adr) || (adr < lower_adr))
 		return false;
 
-	std::list<cheat_dat>::iterator ite;
-	cheat_dat *tmp;
-
-	for (ite=cheat_list.begin();ite!=cheat_list.end();ite++){
-		tmp=&(*ite);
-		if (adr == tmp->adr) {
+	for (int i = 0; i < cheat_list_count; i++) {
+		if (adr == cheat_list_storage[i].adr) {
 			return true;
 		}
 	}
@@ -166,13 +169,16 @@ bool cheat::has_cheat(word adr) {
 
 byte cheat::cheat_read(word adr)
 {
+#ifdef TARGET_GNW
+	for (int i = 0; i < cheat_list_count; i++) {
+		cheat_dat *tmp = &cheat_list_storage[i];
+#else
 	std::list<cheat_dat>::iterator ite;
 	cheat_dat *tmp;
 
 	for (ite=cheat_list.begin();ite!=cheat_list.end();ite++){
 		tmp=&(*ite);
 
-#ifndef TARGET_GNW
 		if (!tmp->enable)
 			continue;
 #endif

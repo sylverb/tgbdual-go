@@ -20,7 +20,13 @@
 //--------------------------------------------------
 // GB クラス定義部,その他
 
+/* TARGET_GNW: the G&W port builds without libstdc++ (see
+ * Core/Src/porting/core_common/gw_core_cxx_support.cpp) — the `cheat`
+ * class below uses a small fixed-capacity array instead of
+ * std::list<cheat_dat> on this target, so this header isn't needed. */
+#ifndef TARGET_GNW
 #include <list>
+#endif
 
 #include "gb_types.h"
 #include "renderer.h"
@@ -290,24 +296,33 @@ public:
 	void delete_cheat(char *name);
 	std::list<cheat_dat>::iterator find_cheat(char *name);
 	void create_unique_name(char *buf);
+	std::list<cheat_dat>::iterator get_first() { return cheat_list.begin(); }
+	std::list<cheat_dat>::iterator get_end() { return cheat_list.end(); }
 #endif
 
 	void clear();
-
-	std::list<cheat_dat>::iterator get_first() { return cheat_list.begin(); }
-	std::list<cheat_dat>::iterator get_end() { return cheat_list.end(); }
 
 #ifndef TARGET_GNW
 	int *get_cheat_map() { return cheat_map; }
 #endif
 
 private:
-	std::list<cheat_dat> cheat_list;
-#ifndef TARGET_GNW
-	int cheat_map[0x10000];
-#else
+#ifdef TARGET_GNW
+	/* Fixed-capacity replacement for std::list<cheat_dat> — this target
+	 * builds without libstdc++ (see
+	 * Core/Src/porting/core_common/gw_core_cxx_support.cpp). 32 covers
+	 * every individual GameShark/Game Genie code fragment across every
+	 * enabled cheat slot with a lot of headroom (MAX_CHEAT_CODES is 13
+	 * whole cheat *strings*, each almost always a single fragment — see
+	 * apply_cheat_code() in main_gb_tgbdual.cpp). */
+	static const int GNW_MAX_CHEAT_ENTRIES = 32;
+	cheat_dat cheat_list_storage[GNW_MAX_CHEAT_ENTRIES];
+	int cheat_list_count;
 	word upper_adr;
 	word lower_adr;
+#else
+	std::list<cheat_dat> cheat_list;
+	int cheat_map[0x10000];
 #endif
 	gb *ref_gb;
 };
