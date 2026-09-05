@@ -26,7 +26,6 @@
 #include <string.h>
 #ifdef TARGET_GNW
 #include "gw_malloc.h"
-#include "heap.hpp"
 #endif
 
 #define Z_FLAG 0x40
@@ -118,14 +117,14 @@ cpu::~cpu()
 #ifdef TARGET_GNW
 void cpu::init_ram()
 {
+	/* Standalone core packs hot code in ITCM; keep WRAM/VRAM in DTCM. */
 	if (ram == NULL) {
-		heap_itc_alloc(true);
 		if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
-			ram = (byte *)heap_alloc_mem(0x2000*4);
-			vram = (byte *)heap_alloc_mem(0x2000*2);
+			ram = (byte *)dtc_calloc(1, 0x2000*4);
+			vram = (byte *)dtc_calloc(1, 0x2000*2);
 		} else {
-			ram = (byte *)heap_alloc_mem(0x2000);
-			vram = (byte *)heap_alloc_mem(0x2000);
+			ram = (byte *)dtc_calloc(1, 0x2000);
+			vram = (byte *)dtc_calloc(1, 0x2000);
 		}
 	}
 	vram_bank=vram;
