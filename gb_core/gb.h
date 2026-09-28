@@ -31,6 +31,7 @@
 #include "gb_types.h"
 #include "renderer.h"
 #include "serializer.h"
+#include <stddef.h>
 
 #define INT_VBLANK 1
 #define INT_LCDC 2
@@ -208,6 +209,8 @@ public:
 	gb *get_target() { return target; }
 	gb_regs *get_regs() { return &regs; }
 	gbc_regs *get_cregs() { return &c_regs; }
+	byte get_key0() const { return key0; }
+	void set_key0(byte v) { key0 = v; }
 
 	void run();
 	void reset();
@@ -217,8 +220,21 @@ public:
 	void set_console_mode(int mode);
 	int get_console_mode() const { return console_mode; }
 	int resolve_gb_type() const;
+	/* DMG cart on CGB hardware (KEY0 DMG-compat): BGP/OBP index into CGB pals. */
+	bool dmg_compat_mode() const;
 	sgb *get_sgb() { return m_sgb; }
 	bool load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent);
+
+	/* Optional boot ROMs from /bios/gb/{gb,gbc}_bios.bin. NULL = skip to post-boot. */
+	void set_dmg_boot_rom(const byte *data, size_t size);
+	void set_cgb_boot_rom(const byte *data, size_t size);
+	bool has_dmg_boot_rom() const { return dmg_boot_rom != NULL; }
+	bool has_cgb_boot_rom() const { return cgb_boot_rom != NULL; }
+	const byte *get_dmg_boot_rom() const { return dmg_boot_rom; }
+	const byte *get_cgb_boot_rom() const { return cgb_boot_rom; }
+	size_t get_dmg_boot_rom_size() const { return dmg_boot_rom_size; }
+	size_t get_cgb_boot_rom_size() const { return cgb_boot_rom_size; }
+	bool will_use_boot_rom() const;
 
 	/* Evaluate STAT IRQ line (mode 0/1/2 + LYC OR'd). Rising edge => LCDC IF. */
 	void update_stat_irq();
@@ -256,6 +272,8 @@ private:
 
 	gb_regs regs;
 	gbc_regs c_regs;
+	/* FF4C KEY0 — kept out of c_regs so savestate layout stays stable. */
+	byte key0;
 
 	word dmy[160*5]; // vframe はみ出した時用
 	word vframe[160*(144+100)];
@@ -269,6 +287,12 @@ private:
 	bool hook_ext;
 	bool use_gba;
 	int console_mode;
+
+	/* Optional Nintendo boot ROMs (not owned — lifetime = session). */
+	const byte *dmg_boot_rom;
+	size_t dmg_boot_rom_size;
+	const byte *cgb_boot_rom;
+	size_t cgb_boot_rom_size;
 
 	/* STAT IRQ line (OR of enabled mode/LYC sources). Rising edge => INT_LCDC. */
 	bool stat_irq_line;
@@ -610,6 +634,7 @@ public:
 	void reset();
 	void set_trace(bool trace) { b_trace=trace; }
 
+	bool is_boot_rom_mapped() const { return boot_rom_mapped; }
 	byte *get_vram() { return vram; }
 	byte *get_ram() { return ram; }
 	byte *get_oam() { return oam; }
@@ -682,4 +707,9 @@ private:
 	byte *dma_dest_bank;
 
 	byte _ff6c,_ff72,_ff73,_ff74,_ff75;
+
+	/* While true, 0x0000-0x00FF (and CGB 0x0200-0x08FF) map the boot ROM. */
+	bool boot_rom_mapped;
+	const byte *boot_rom;
+	size_t boot_rom_size;
 };

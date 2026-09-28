@@ -36,6 +36,11 @@ gb::gb(renderer *ref,bool b_lcd,bool b_apu)
 	m_cpu=new cpu(this);
 	m_sgb=new sgb(this);
 	console_mode=GB_CONSOLE_DMG;
+	key0=0;
+	dmg_boot_rom=NULL;
+	dmg_boot_rom_size=0;
+	cgb_boot_rom=NULL;
+	cgb_boot_rom_size=0;
 #if CHEAT_CODES == 1
 	m_cheat=new cheat(this);
 #endif
@@ -64,27 +69,43 @@ gb::~gb()
 
 void gb::reset()
 {
-	regs.P1=0xCF; /* DMG/SGB boot value — required for SGB re-detection */
-	regs.SC=0;
-	regs.DIV=0;
-	regs.TIMA=0;
-	regs.TMA=0;
-	regs.TAC=0;
-	regs.LCDC=0x91;
-	regs.STAT=0;
-	regs.SCY=0;
-	regs.SCX=0;
-	regs.LY=153;
-	regs.LYC=0;
-	regs.BGP=0xFC;
-	regs.OBP1=0xFF;
-	regs.OBP2=0xFF;
-	regs.WY=0;
-	regs.WX=0;
-	regs.IF=0;
-	regs.IE=0;
+	bool boot = will_use_boot_rom();
 
-	memset(&c_regs,0,sizeof(c_regs));
+	if (boot) {
+		/* Pre-boot I/O — boot ROM initializes the rest. */
+		memset(&regs, 0, sizeof(regs));
+		memset(&c_regs, 0, sizeof(c_regs));
+		key0 = 0;
+		regs.P1 = 0xCF;
+	} else {
+		regs.P1=0xCF; /* DMG/SGB boot value — required for SGB re-detection */
+		regs.SC=0;
+		regs.DIV=0;
+		regs.TIMA=0;
+		regs.TMA=0;
+		regs.TAC=0;
+		regs.LCDC=0x91;
+		regs.STAT=0;
+		regs.SCY=0;
+		regs.SCX=0;
+		regs.LY=153;
+		regs.LYC=0;
+		regs.BGP=0xFC;
+		regs.OBP1=0xFF;
+		regs.OBP2=0xFF;
+		regs.WY=0;
+		regs.WX=0;
+		regs.IF=0;
+		regs.IE=0;
+
+		memset(&c_regs,0,sizeof(c_regs));
+		key0 = 0;
+		/* Post-boot DMG-on-CGB: match boot ROM handoff (KEY0=$04, OPRI=$01). */
+		if (m_rom->get_loaded() && resolve_gb_type() >= 3 &&
+		    (m_rom->get_rom()[0x143] & 0x80) == 0) {
+			key0 = 0x04;
+		}
+	}
 
 	if (m_rom->get_loaded())
 		m_rom->get_info()->gb_type=resolve_gb_type();
@@ -103,6 +124,30 @@ void gb::reset()
 	skip=skip_buf=0;
 	re_render=0;
 	stat_irq_line=false;
+}
+
+void gb::set_dmg_boot_rom(const byte *data, size_t size)
+{
+	dmg_boot_rom = (data && size >= 0x100) ? data : NULL;
+	dmg_boot_rom_size = dmg_boot_rom ? size : 0;
+}
+
+void gb::set_cgb_boot_rom(const byte *data, size_t size)
+{
+	/* Official CGB boot ROM is 0x900 bytes (maps 0000-00FF + 0200-08FF). */
+	cgb_boot_rom = (data && size >= 0x900) ? data : NULL;
+	cgb_boot_rom_size = cgb_boot_rom ? size : 0;
+}
+
+bool gb::will_use_boot_rom() const
+{
+	if (!m_rom->get_loaded())
+		return false;
+	int t = resolve_gb_type();
+	if (t >= 3)
+		return cgb_boot_rom != NULL;
+	/* DMG + SGB use the DMG boot ROM when present. */
+	return dmg_boot_rom != NULL;
 }
 
 void gb::update_stat_irq()
@@ -160,9 +205,8 @@ int gb::resolve_gb_type() const
 	case GB_CONSOLE_DMG:
 		return 1;
 	case GB_CONSOLE_CGB:
-		if (cgb_cart)
-			return use_gba?4:3;
-		return 1;
+		/* GBC hardware for CGB carts and for DMG carts in GBC mode. */
+		return use_gba?4:3;
 	case GB_CONSOLE_SGB:
 		if (!cgb_only)
 			return 2;
@@ -170,6 +214,22 @@ int gb::resolve_gb_type() const
 	default:
 		return 1;
 	}
+}
+
+bool gb::dmg_compat_mode() const
+{
+	if (resolve_gb_type() < 3)
+		return false;
+	/* During CGB boot the logo uses full CGB attrs; KEY0 is written last. */
+	if (m_cpu->is_boot_rom_mapped())
+		return (key0 & 0x0C) != 0;
+	/* Boot ROM writes KEY0=$04 before unmapping; bits 2–3 mark DMG compat. */
+	if (key0 & 0x0C)
+		return true;
+	/* Skipped boot ROM / savestate without KEY0: DMG cart on CGB → compat PPU. */
+	if (!m_rom->get_loaded())
+		return false;
+	return (m_rom->get_rom()[0x143] & 0x80) == 0;
 }
 
 bool gb::load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent)
@@ -247,6 +307,9 @@ bool gb::restore_state_mem(void *buf, int version)
 
 	serializer s(buf, serializer::LOAD_BUF);
 	serialize(s, version);
+
+	/* Savestates are always post-boot (boot ROM already unmapped). */
+	m_cpu->boot_rom_mapped = false;
 
 	if (version == GB_SAVESTATE_V0) {
 		/* v0 has no SGB blob — ensure HLE stays disabled. */

@@ -97,6 +97,9 @@ cpu::cpu(gb *ref)
 {
 	ref_gb=ref;
 	b_trace=false;
+	boot_rom_mapped=false;
+	boot_rom=NULL;
+	boot_rom_size=0;
 #ifdef TARGET_GNW
 	ram=NULL;
 	vram=NULL;
@@ -117,9 +120,12 @@ cpu::~cpu()
 #ifdef TARGET_GNW
 void cpu::init_ram()
 {
-	/* Standalone core packs hot code in ITCM; keep WRAM/VRAM in DTCM. */
+	/* Prefer CGB-sized WRAM/VRAM when a GBC boot ROM is available so the
+	 * System menu can switch DMG→GBC without realloc (no dtc_free). */
+	bool need_cgb = (ref_gb->get_rom()->get_info()->gb_type >= 3) ||
+	                ref_gb->has_cgb_boot_rom();
 	if (ram == NULL) {
-		if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
+		if (need_cgb) {
 			ram = (byte *)dtc_calloc(1, 0x2000*4);
 			vram = (byte *)dtc_calloc(1, 0x2000*2);
 		} else {
@@ -134,28 +140,63 @@ void cpu::init_ram()
 
 void cpu::reset()
 {
-	/* Post-boot registers per Pan Docs. Asteroids (ModRetro Chromatic) checks
-	 * D!=0 to accept CGB; DMG DE=$00D8 leaves D=0 and the cart freezes in HALT. */
-	if (ref_gb->get_rom()->get_info()->gb_type >= 4) {
-		/* AGB as CGB */
+	boot_rom_mapped = false;
+	boot_rom = NULL;
+	boot_rom_size = 0;
+
+	int gb_type = ref_gb->get_rom()->get_loaded()
+	              ? ref_gb->get_rom()->get_info()->gb_type : 1;
+
+	if (gb_type >= 3 && ref_gb->has_cgb_boot_rom()) {
+		boot_rom = ref_gb->get_cgb_boot_rom();
+		boot_rom_size = ref_gb->get_cgb_boot_rom_size();
+		boot_rom_mapped = true;
+	} else if (gb_type < 3 && ref_gb->has_dmg_boot_rom()) {
+		boot_rom = ref_gb->get_dmg_boot_rom();
+		boot_rom_size = ref_gb->get_dmg_boot_rom_size();
+		boot_rom_mapped = true;
+	}
+
+	if (boot_rom_mapped) {
+		/* Power-on CPU state; boot ROM runs from $0000. */
+		regs.AF.w = 0;
+		regs.BC.w = 0;
+		regs.DE.w = 0;
+		regs.HL.w = 0;
+		regs.I = 0;
+		regs.SP = 0;
+		regs.PC = 0;
+	} else if (gb_type >= 4) {
+		/* AGB as CGB — post-boot registers per Pan Docs. */
 		regs.AF.w = 0x1100;
 		regs.BC.w = 0x0100;
 		regs.DE.w = 0x0008;
 		regs.HL.w = 0x000D;
-	} else if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
+		regs.I = 0;
+		regs.SP = 0xFFFE;
+		regs.PC = 0x100;
+	} else if (gb_type >= 3) {
+		/* Asteroids (ModRetro Chromatic) checks D!=0 to accept CGB. */
 		regs.AF.w = 0x1180;
 		regs.BC.w = 0x0000;
 		regs.DE.w = 0xFF56;
 		regs.HL.w = 0x000D;
+		regs.I = 0;
+		regs.SP = 0xFFFE;
+		regs.PC = 0x100;
+		/* DMG cart without boot ROM: OPRI=1 (DMG OBJ priority). KEY0 set in gb::reset. */
+		if (ref_gb->get_rom()->get_loaded() &&
+		    (ref_gb->get_rom()->get_rom()[0x143] & 0x80) == 0)
+			_ff6c = 1;
 	} else {
 		regs.AF.w = 0x01B0;
 		regs.BC.w = 0x0013;
 		regs.DE.w = 0x00D8;
 		regs.HL.w = 0x014D;
+		regs.I = 0;
+		regs.SP = 0xFFFE;
+		regs.PC = 0x100;
 	}
-	regs.I=0;
-	regs.SP=0xFFFE;
-	regs.PC=0x100;
 
 	rest_clock=0;
 	total_clock=sys_clock=div_clock=0;
@@ -171,7 +212,7 @@ void cpu::reset()
 	int_disable=false;
 
 	if (ram != NULL) {
-		if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
+		if (gb_type >= 3 || ref_gb->has_cgb_boot_rom()) {
 			memset(ram,0,0x2000*4);
 		} else {
 			memset(ram,0,0x2000);
@@ -179,7 +220,7 @@ void cpu::reset()
 		ram_bank=ram+0x1000;
 	}
 	if (vram != NULL) {
-		if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
+		if (gb_type >= 3 || ref_gb->has_cgb_boot_rom()) {
 			memset(vram,0,0x2000*2);
 		} else {
 			memset(vram,0,0x2000);
@@ -239,6 +280,15 @@ void cpu::restore_state_ex(int *dat)
 
 byte cpu::read_direct(word adr)
 {
+	if (boot_rom_mapped && boot_rom) {
+		if (adr < 0x100)
+			return boot_rom[adr];
+		/* CGB boot ROM also covers $0200-$08FF; $0100-$01FF stays cart header. */
+		if (boot_rom_size > 0x100 && adr >= 0x200 && adr < 0x900 &&
+		    adr < (word)boot_rom_size)
+			return boot_rom[adr];
+	}
+
 	switch(adr>>13){
 	case 0:
 	case 1:
@@ -390,6 +440,8 @@ byte cpu::io_read(word adr)
 		return ref_gb->get_regs()->WX;
 
 		//以下カラーでの追加 // Adding color below // TODO: continue translation
+	case 0xFF4C://KEY0 (CGB: DMG compatibility / PGB mode)
+		return ref_gb->get_key0();
 	case 0xFF4D://KEY1システムクロック変更 // KEY1 change system clock
 		return (speed?0x80:(ref_gb->get_cregs()->KEY1&1)?1:0x7E);
 	case 0xFF4F://VBK(内部VRAMバンク切り替え) // VBK (Internal bank switching VRAM)
@@ -646,6 +698,9 @@ void cpu::io_write(word adr,byte dat)
 			return;
 
 			//以下カラーでの追加 // Add color below
+		case 0xFF4C://KEY0 (CGB: $04 = DMG compatibility mode for mono carts)
+			ref_gb->set_key0(dat);
+			return;
 		case 0xFF4D://KEY1システムクロック変更 // KEY1 change system clock
 //			speed=dat&1;
 			ref_gb->get_cregs()->KEY1=dat&1;
@@ -659,6 +714,9 @@ void cpu::io_write(word adr,byte dat)
 				return;
 			vram_bank=vram+0x2000*(dat&0x01);
 			ref_gb->get_cregs()->VBK=dat;//&0x01;
+			return;
+		case 0xFF50://BANK (boot ROM disable) — any write unmaps the boot ROM
+			boot_rom_mapped = false;
 			return;
 		case 0xFF51://HDMA1(転送元上位) // HDMA1 (upper source)
 			dma_src&=0x00F0;

@@ -674,11 +674,26 @@ void lcd::bg_render_color(void *buf,int scanline)
 	byte *trans=trans_tbl;
 	byte *priority=priority_tbl;
 
+	/* DMG-compat on CGB: ignore attr map; BGP indexes into BG palette 0. */
+	bool dmg_compat = ref_gb->dmg_compat_mode();
+	word dmg_pal[4];
+	if (dmg_compat) {
+		byte bgp = ref_gb->get_regs()->BGP;
+		for (int pi = 0; pi < 4; pi++)
+			dmg_pal[pi] = mapped_pal[0][(bgp >> (pi * 2)) & 3];
+	}
+
 	tile=*(now_tile++);
 	atr=*(now_atr++);
 
-	pal=mapped_pal[atr&7];
-	bank=(atr<<9)&0x1000;
+	if (dmg_compat) {
+		atr = 0;
+		pal = dmg_pal;
+		bank = 0;
+	} else {
+		pal=mapped_pal[atr&7];
+		bank=(atr<<9)&0x1000;
+	}
 	tmp_dat=(tile&0x80)?*(((atr&0x40)?now_share2:now_share)+(tile<<3)+bank):*(((atr&0x40)?now_pat2:now_pat)+(tile<<3)+bank);
 	calc1=tmp_dat;
 	calc2=tmp_dat>>7;
@@ -741,8 +756,14 @@ void lcd::bg_render_color(void *buf,int scanline)
 		tile=*(now_tile++);
 		atr=*(now_atr++);
 
-		pal=mapped_pal[atr&7];
-		bank=(atr<<9)&0x1000;
+		if (dmg_compat) {
+			atr = 0;
+			pal = dmg_pal;
+			bank = 0;
+		} else {
+			pal=mapped_pal[atr&7];
+			bank=(atr<<9)&0x1000;
+		}
 		tmp_dat=(tile&0x80)?*(((atr&0x40)?now_share2:now_share)+(tile<<3)+bank):*(((atr&0x40)?now_pat2:now_pat)+(tile<<3)+bank);
 
 		calc1=tmp_dat;
@@ -830,11 +851,25 @@ void lcd::win_render_color(void *buf,int scanline)
 	byte atr;
 	word bank;
 
+	bool dmg_compat = ref_gb->dmg_compat_mode();
+	word dmg_pal[4];
+	if (dmg_compat) {
+		byte bgp = ref_gb->get_regs()->BGP;
+		for (int pi = 0; pi < 4; pi++)
+			dmg_pal[pi] = mapped_pal[0][(bgp >> (pi * 2)) & 3];
+	}
+
 	for (i=win_x>>3;i<21;i++){
 		tile=*(now_tile++);
 		atr=*(now_atr++);
-		bank=(atr<<9)&0x1000;
-		pal=mapped_pal[atr&7];
+		if (dmg_compat) {
+			atr = 0;
+			bank = 0;
+			pal = dmg_pal;
+		} else {
+			bank=(atr<<9)&0x1000;
+			pal=mapped_pal[atr&7];
+		}
 		tmp_dat=(tile&0x80)?*(((atr&0x40)?now_share2:now_share)+(tile<<3)+bank):*(((atr&0x40)?now_pat2:now_pat)+(tile<<3)+bank);
 		calc1=tmp_dat;
 		calc2=tmp_dat>>7;
@@ -892,12 +927,28 @@ void lcd::sprite_render_color(void *buf,int scanline)
 	bool sp_size=(ref_gb->get_regs()->LCDC&0x04)?true:false;
 
 	word bank;
+	bool dmg_compat = ref_gb->dmg_compat_mode();
+	word dmg_obp[2][4];
+	if (dmg_compat) {
+		byte obp0 = ref_gb->get_regs()->OBP1;
+		byte obp1 = ref_gb->get_regs()->OBP2;
+		for (int pi = 0; pi < 4; pi++) {
+			dmg_obp[0][pi] = mapped_pal[8][(obp0 >> (pi * 2)) & 3];
+			dmg_obp[1][pi] = mapped_pal[9][(obp1 >> (pi * 2)) & 3];
+		}
+	}
 
 	for (i=39;i>=0;i--){
 		tile=oam[i*4+2];
 		atr=oam[i*4+3];
-		cur_p=mapped_pal[(atr&7)+8];
-		bank=(atr&0x08?0x2000:0);
+		if (dmg_compat) {
+			/* Bit 4 selects OBP0/OBP1; no CGB VRAM bank. */
+			cur_p = dmg_obp[(atr & 0x10) ? 1 : 0];
+			bank = 0;
+		} else {
+			cur_p=mapped_pal[(atr&7)+8];
+			bank=(atr&0x08?0x2000:0);
+		}
 
 		if (sp_size){ // 8*16
 			y=oam[i*4]-1;
