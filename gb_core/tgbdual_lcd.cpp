@@ -23,8 +23,10 @@
 
 #include "gb.h"
 #include "tgbdual_sgb.h"
+#include "dmg_gbc_palettes.h"
+#include <stdio.h>
 
-// Color palette is in BGR555 format
+/* Index 0 in the UI is "GBC" (per-game BIOS colorization). These are 1..N. */
 static word dmg_palettes[][4] = {
  	{ 0x7FFF, 0x56B5, 0x4631, 0x0000 }, // GB_TGBDUAL_PALETTE
  	{ 0x7FFF, 0x5AD6, 0x318C, 0x0000 }, // GB_2BGRAYS_PALETTE
@@ -66,15 +68,81 @@ char lcd::get_current_palette() {
 }
 
 char lcd::get_palette_count() {
-	return sizeof(dmg_palettes)/sizeof(dmg_palettes[0]);
+	/* +1 for index 0 = GBC per-game colorization (gnuboy / old retro-go). */
+	return (char)(sizeof(dmg_palettes)/sizeof(dmg_palettes[0]) + 1);
 }
 
 void lcd::set_palette(char index)
 {
+	int ncustom = (int)(sizeof(dmg_palettes)/sizeof(dmg_palettes[0]));
+	int max = ncustom; /* valid indices 0..ncustom (0 = GBC) */
+	if (index < 0)
+		index = 0;
+	if (index > max)
+		index = (char)max;
+
 	cur_palette = index;
-	sgb_color_active=false;
-	for (int i=0;i<4;i++){
-		m_pal16[i]=ref_gb->get_renderer()->map_color(dmg_palettes[index][i]);
+	sgb_color_active = false;
+
+	word bg[4], obp0[4], obp1[4];
+
+	if (index == 0 && ref_gb->get_rom() && ref_gb->get_rom()->get_loaded()) {
+		/* Same algorithm as gnuboy pal_detect_dmg / CGB boot ROM. */
+		const byte *rom = ref_gb->get_rom()->get_rom();
+		uint8_t checksum = 0;
+		for (int i = 0; i < 16; i++)
+			checksum = (uint8_t)(checksum + rom[0x0134 + i]);
+
+		uint8_t infoIdx = 0;
+		for (size_t idx = 0; idx < sizeof(colorization_checksum); idx++) {
+			if (colorization_checksum[idx] == checksum) {
+				infoIdx = (uint8_t)idx;
+				if (idx > 0x40) {
+					for (size_t i = idx - 0x41, j = 0;
+					     i < sizeof(colorization_disambig_chars);
+					     i += 14, j += 14) {
+						if (rom[0x0137] == colorization_disambig_chars[i]) {
+							infoIdx = (uint8_t)(infoIdx + j);
+							break;
+						}
+					}
+				}
+				break;
+			}
+		}
+
+		uint8_t pal = (uint8_t)(colorization_palette_info[infoIdx] & 0x1F);
+		uint8_t flags = (uint8_t)((colorization_palette_info[infoIdx] & 0xE0) >> 5);
+		const uint16_t *bgp = dmg_game_palettes[pal][2];
+		const uint16_t *o0 = dmg_game_palettes[pal][(flags & 1) ? 0 : 1];
+		const uint16_t *o1 = dmg_game_palettes[pal][(flags & 2) ? 0 : 1];
+		if (!(flags & 4))
+			o1 = dmg_game_palettes[pal][2];
+
+		for (int i = 0; i < 4; i++) {
+			bg[i] = (word)(bgp[i] & 0x7FFF);
+			obp0[i] = (word)(o0[i] & 0x7FFF);
+			obp1[i] = (word)(o1[i] & 0x7FFF);
+		}
+		printf("lcd: GBC colorization palette %u (checksum 0x%02X)\n",
+		       (unsigned)pal, (unsigned)checksum);
+	} else {
+		/* No ROM yet (ctor), or fixed custom palette 1..N → dmg_palettes[N-1]. */
+		int custom = (index == 0) ? 0 : (index - 1);
+		if (custom < 0 || custom >= ncustom)
+			custom = 0;
+		for (int i = 0; i < 4; i++) {
+			bg[i] = dmg_palettes[custom][i];
+			obp0[i] = dmg_palettes[custom][i];
+			obp1[i] = dmg_palettes[custom][i];
+		}
+	}
+
+	for (int i = 0; i < 4; i++) {
+		m_pal16[i] = ref_gb->get_renderer()->map_color(bg[i]);
+		/* Sprite path uses m_obp_sgb for DMG (incl. GBC colorization). */
+		m_obp_sgb[0][i] = ref_gb->get_renderer()->map_color(obp0[i]);
+		m_obp_sgb[1][i] = ref_gb->get_renderer()->map_color(obp1[i]);
 	}
 }
 
@@ -503,26 +571,15 @@ void lcd::sprite_render(void *buf,int scanline)
 	bool sp_size=(ref_gb->get_regs()->LCDC&0x04)?true:false;
 	int palnum;
 
-	if (sgb_color_active){
-		pal[0][0]=m_obp_sgb[0][ref_gb->get_regs()->OBP1&0x3];
-		pal[0][1]=m_obp_sgb[0][(ref_gb->get_regs()->OBP1>>2)&0x3];
-		pal[0][2]=m_obp_sgb[0][(ref_gb->get_regs()->OBP1>>4)&0x3];
-		pal[0][3]=m_obp_sgb[0][(ref_gb->get_regs()->OBP1>>6)&0x3];
-		pal[1][0]=m_obp_sgb[1][ref_gb->get_regs()->OBP2&0x3];
-		pal[1][1]=m_obp_sgb[1][(ref_gb->get_regs()->OBP2>>2)&0x3];
-		pal[1][2]=m_obp_sgb[1][(ref_gb->get_regs()->OBP2>>4)&0x3];
-		pal[1][3]=m_obp_sgb[1][(ref_gb->get_regs()->OBP2>>6)&0x3];
-	}else{
-		pal[0][0]=m_pal16[ref_gb->get_regs()->OBP1&0x3];
-		pal[0][1]=m_pal16[(ref_gb->get_regs()->OBP1>>2)&0x3];
-		pal[0][2]=m_pal16[(ref_gb->get_regs()->OBP1>>4)&0x3];
-		pal[0][3]=m_pal16[(ref_gb->get_regs()->OBP1>>6)&0x3];
-
-		pal[1][0]=m_pal16[ref_gb->get_regs()->OBP2&0x3];
-		pal[1][1]=m_pal16[(ref_gb->get_regs()->OBP2>>2)&0x3];
-		pal[1][2]=m_pal16[(ref_gb->get_regs()->OBP2>>4)&0x3];
-		pal[1][3]=m_pal16[(ref_gb->get_regs()->OBP2>>6)&0x3];
-	}
+	/* m_obp_sgb holds OBP0/OBP1 for SGB and for DMG (incl. GBC colorization). */
+	pal[0][0]=m_obp_sgb[0][ref_gb->get_regs()->OBP1&0x3];
+	pal[0][1]=m_obp_sgb[0][(ref_gb->get_regs()->OBP1>>2)&0x3];
+	pal[0][2]=m_obp_sgb[0][(ref_gb->get_regs()->OBP1>>4)&0x3];
+	pal[0][3]=m_obp_sgb[0][(ref_gb->get_regs()->OBP1>>6)&0x3];
+	pal[1][0]=m_obp_sgb[1][ref_gb->get_regs()->OBP2&0x3];
+	pal[1][1]=m_obp_sgb[1][(ref_gb->get_regs()->OBP2>>2)&0x3];
+	pal[1][2]=m_obp_sgb[1][(ref_gb->get_regs()->OBP2>>4)&0x3];
+	pal[1][3]=m_obp_sgb[1][(ref_gb->get_regs()->OBP2>>6)&0x3];
 
 	for (i=39;i>=0;i--){
 		tile=oam[i*4+2];
