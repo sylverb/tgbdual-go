@@ -86,7 +86,9 @@ void lcd::set_palette(char index)
 
 	word bg[4], obp0[4], obp1[4];
 
-	if (index == 0 && ref_gb->get_rom() && ref_gb->get_rom()->get_loaded()) {
+	/* Guard: get_rom() must exist (rom constructed before lcd) and be loaded. */
+	if (index == 0 && ref_gb->get_rom() != NULL &&
+	    ref_gb->get_rom()->get_loaded()) {
 		/* Same algorithm as gnuboy pal_detect_dmg / CGB boot ROM. */
 		const byte *rom = ref_gb->get_rom()->get_rom();
 		uint8_t checksum = 0;
@@ -155,11 +157,12 @@ void lcd::apply_sgb_palettes(const word pals[4][4])
 			m_sgb_pal[p][i] = ref_gb->get_renderer()->map_color(c);
 		}
 	}
-	/* Default mono path / shared BG uses palette 0; OBJ uses palette 1. */
+	/* Fallback mono path uses palette 0. Real SGB OBJ coloring uses the
+	 * ATTR map at each pixel (see sprite_render) — not a fixed palette 1. */
 	for (int i = 0; i < 4; i++) {
 		m_pal16[i] = m_sgb_pal[0][i];
-		m_obp_sgb[0][i] = m_sgb_pal[1][i];
-		m_obp_sgb[1][i] = m_sgb_pal[1][i];
+		m_obp_sgb[0][i] = m_sgb_pal[0][i];
+		m_obp_sgb[1][i] = m_sgb_pal[0][i];
 	}
 }
 
@@ -571,20 +574,61 @@ void lcd::sprite_render(void *buf,int scanline)
 	bool sp_size=(ref_gb->get_regs()->LCDC&0x04)?true:false;
 	int palnum;
 
-	/* m_obp_sgb holds OBP0/OBP1 for SGB and for DMG (incl. GBC colorization). */
-	pal[0][0]=m_obp_sgb[0][ref_gb->get_regs()->OBP1&0x3];
-	pal[0][1]=m_obp_sgb[0][(ref_gb->get_regs()->OBP1>>2)&0x3];
-	pal[0][2]=m_obp_sgb[0][(ref_gb->get_regs()->OBP1>>4)&0x3];
-	pal[0][3]=m_obp_sgb[0][(ref_gb->get_regs()->OBP1>>6)&0x3];
-	pal[1][0]=m_obp_sgb[1][ref_gb->get_regs()->OBP2&0x3];
-	pal[1][1]=m_obp_sgb[1][(ref_gb->get_regs()->OBP2>>2)&0x3];
-	pal[1][2]=m_obp_sgb[1][(ref_gb->get_regs()->OBP2>>4)&0x3];
-	pal[1][3]=m_obp_sgb[1][(ref_gb->get_regs()->OBP2>>6)&0x3];
+	/* OBP0/OBP1 → gray shade (SNES palette index). SGB applies ATTR on top. */
+	byte sh0[4], sh1[4];
+	byte obp0 = ref_gb->get_regs()->OBP1;
+	byte obp1 = ref_gb->get_regs()->OBP2;
+	sh0[0] = (byte)(obp0 & 3);
+	sh0[1] = (byte)((obp0 >> 2) & 3);
+	sh0[2] = (byte)((obp0 >> 4) & 3);
+	sh0[3] = (byte)((obp0 >> 6) & 3);
+	sh1[0] = (byte)(obp1 & 3);
+	sh1[1] = (byte)((obp1 >> 2) & 3);
+	sh1[2] = (byte)((obp1 >> 4) & 3);
+	sh1[3] = (byte)((obp1 >> 6) & 3);
+	const byte *sh = sh0;
+
+	const byte *sgb_am = 0;
+	int sgb_row = 0;
+	if (sgb_color_active) {
+		/* Real SGB: every LCD pixel (BG and OBJ) is colorized from the ATTR
+		 * map at its screen position. OBJ cannot pick a separate palette. */
+		sgb_am = ref_gb->get_sgb()->attr_map();
+		int aty = scanline >> 3;
+		if (aty > 17) aty = 17;
+		sgb_row = aty * 20;
+	} else {
+		/* DMG / GBC-colorization: pre-mapped RGB in m_obp_sgb. */
+		pal[0][0]=m_obp_sgb[0][sh0[0]];
+		pal[0][1]=m_obp_sgb[0][sh0[1]];
+		pal[0][2]=m_obp_sgb[0][sh0[2]];
+		pal[0][3]=m_obp_sgb[0][sh0[3]];
+		pal[1][0]=m_obp_sgb[1][sh1[0]];
+		pal[1][1]=m_obp_sgb[1][sh1[1]];
+		pal[1][2]=m_obp_sgb[1][sh1[2]];
+		pal[1][3]=m_obp_sgb[1][sh1[3]];
+	}
+
+	/* Put sprite color index cidx at screen x sx into *dest. */
+#define SPR_PUT(dest, sx, cidx) do { \
+		int _c = (int)(cidx); \
+		if (_c) { \
+			if (sgb_color_active) { \
+				int _atx = (sx) >> 3; \
+				if (_atx < 0) _atx = 0; \
+				else if (_atx > 19) _atx = 19; \
+				*(dest) = m_sgb_pal[sgb_am[sgb_row + _atx] & 3][sh[_c]]; \
+			} else { \
+				*(dest) = cur_p[_c]; \
+			} \
+		} \
+	} while (0)
 
 	for (i=39;i>=0;i--){
 		tile=oam[i*4+2];
 		atr=oam[i*4+3];
 		palnum=(atr>>4)&1;
+		sh = palnum ? sh1 : sh0;
 		cur_p=pal[palnum];
 
 		if (sp_size){ // 8*16
@@ -634,47 +678,48 @@ void lcd::sprite_render(void *buf,int scanline)
 
 		if (x<0){ // クリッピング処理
 			if (atr&0x80){ // プライオリティ(背面に)
-				if ((-x)<=1) if (!trans_tbl[x+1]) if (l1>>6) *(now_pos+1)=cur_p[l1>>6];
-				if ((-x)<=2) if (!trans_tbl[x+2]) if ((l2>>4)&3) *(now_pos+2)=cur_p[(l2>>4)&3];
-				if ((-x)<=3) if (!trans_tbl[x+3]) if ((l1>>4)&3) *(now_pos+3)=cur_p[(l1>>4)&3];
-				if ((-x)<=4) if (!trans_tbl[x+4]) if ((l2>>2)&3) *(now_pos+4)=cur_p[(l2>>2)&3];
-				if ((-x)<=5) if (!trans_tbl[x+5]) if ((l1>>2)&3) *(now_pos+5)=cur_p[(l1>>2)&3];
-				if ((-x)<=6) if (!trans_tbl[x+6]) if (l2&3) *(now_pos+6)=cur_p[l2&3];
-				if ((-x)<=7) if (!trans_tbl[x+7]) if (l1&3) *(now_pos+7)=cur_p[l1&3];
+				if ((-x)<=1) if (!trans_tbl[x+1]) SPR_PUT(now_pos+1, x+1, l1>>6);
+				if ((-x)<=2) if (!trans_tbl[x+2]) SPR_PUT(now_pos+2, x+2, (l2>>4)&3);
+				if ((-x)<=3) if (!trans_tbl[x+3]) SPR_PUT(now_pos+3, x+3, (l1>>4)&3);
+				if ((-x)<=4) if (!trans_tbl[x+4]) SPR_PUT(now_pos+4, x+4, (l2>>2)&3);
+				if ((-x)<=5) if (!trans_tbl[x+5]) SPR_PUT(now_pos+5, x+5, (l1>>2)&3);
+				if ((-x)<=6) if (!trans_tbl[x+6]) SPR_PUT(now_pos+6, x+6, l2&3);
+				if ((-x)<=7) if (!trans_tbl[x+7]) SPR_PUT(now_pos+7, x+7, l1&3);
 			}
 			else{
-				if ((-x)<=1) if (l1>>6) *(now_pos+1)=cur_p[l1>>6];
-				if ((-x)<=2) if ((l2>>4)&3) *(now_pos+2)=cur_p[(l2>>4)&3];
-				if ((-x)<=3) if ((l1>>4)&3) *(now_pos+3)=cur_p[(l1>>4)&3];
-				if ((-x)<=4) if ((l2>>2)&3) *(now_pos+4)=cur_p[(l2>>2)&3];
-				if ((-x)<=5) if ((l1>>2)&3) *(now_pos+5)=cur_p[(l1>>2)&3];
-				if ((-x)<=6) if (l2&3) *(now_pos+6)=cur_p[l2&3];
-				if ((-x)<=7) if (l1&3) *(now_pos+7)=cur_p[l1&3];
+				if ((-x)<=1) SPR_PUT(now_pos+1, x+1, l1>>6);
+				if ((-x)<=2) SPR_PUT(now_pos+2, x+2, (l2>>4)&3);
+				if ((-x)<=3) SPR_PUT(now_pos+3, x+3, (l1>>4)&3);
+				if ((-x)<=4) SPR_PUT(now_pos+4, x+4, (l2>>2)&3);
+				if ((-x)<=5) SPR_PUT(now_pos+5, x+5, (l1>>2)&3);
+				if ((-x)<=6) SPR_PUT(now_pos+6, x+6, l2&3);
+				if ((-x)<=7) SPR_PUT(now_pos+7, x+7, l1&3);
 			}
 		}
 		else{
 			if (atr&0x80){
-				if (!trans_tbl[x+0]) if (l2>>6) *(now_pos)=cur_p[l2>>6];
-				if (!trans_tbl[x+1]) if (l1>>6) *(now_pos+1)=cur_p[l1>>6];
-				if (!trans_tbl[x+2]) if ((l2>>4)&3) *(now_pos+2)=cur_p[(l2>>4)&3];
-				if (!trans_tbl[x+3]) if ((l1>>4)&3) *(now_pos+3)=cur_p[(l1>>4)&3];
-				if (!trans_tbl[x+4]) if ((l2>>2)&3) *(now_pos+4)=cur_p[(l2>>2)&3];
-				if (!trans_tbl[x+5]) if ((l1>>2)&3) *(now_pos+5)=cur_p[(l1>>2)&3];
-				if (!trans_tbl[x+6]) if (l2&3) *(now_pos+6)=cur_p[l2&3];
-				if (!trans_tbl[x+7]) if (l1&3) *(now_pos+7)=cur_p[l1&3];
+				if (!trans_tbl[x+0]) SPR_PUT(now_pos,   x+0, l2>>6);
+				if (!trans_tbl[x+1]) SPR_PUT(now_pos+1, x+1, l1>>6);
+				if (!trans_tbl[x+2]) SPR_PUT(now_pos+2, x+2, (l2>>4)&3);
+				if (!trans_tbl[x+3]) SPR_PUT(now_pos+3, x+3, (l1>>4)&3);
+				if (!trans_tbl[x+4]) SPR_PUT(now_pos+4, x+4, (l2>>2)&3);
+				if (!trans_tbl[x+5]) SPR_PUT(now_pos+5, x+5, (l1>>2)&3);
+				if (!trans_tbl[x+6]) SPR_PUT(now_pos+6, x+6, l2&3);
+				if (!trans_tbl[x+7]) SPR_PUT(now_pos+7, x+7, l1&3);
 			}
 			else{
-				if (l2>>6) *(now_pos)=cur_p[l2>>6];
-				if (l1>>6) *(now_pos+1)=cur_p[l1>>6];
-				if ((l2>>4)&3) *(now_pos+2)=cur_p[(l2>>4)&3];
-				if ((l1>>4)&3) *(now_pos+3)=cur_p[(l1>>4)&3];
-				if ((l2>>2)&3) *(now_pos+4)=cur_p[(l2>>2)&3];
-				if ((l1>>2)&3) *(now_pos+5)=cur_p[(l1>>2)&3];
-				if (l2&3) *(now_pos+6)=cur_p[l2&3];
-				if (l1&3) *(now_pos+7)=cur_p[l1&3];
+				SPR_PUT(now_pos,   x+0, l2>>6);
+				SPR_PUT(now_pos+1, x+1, l1>>6);
+				SPR_PUT(now_pos+2, x+2, (l2>>4)&3);
+				SPR_PUT(now_pos+3, x+3, (l1>>4)&3);
+				SPR_PUT(now_pos+4, x+4, (l2>>2)&3);
+				SPR_PUT(now_pos+5, x+5, (l1>>2)&3);
+				SPR_PUT(now_pos+6, x+6, l2&3);
+				SPR_PUT(now_pos+7, x+7, l1&3);
 			}
 		}
 	}
+#undef SPR_PUT
 }
 
 void lcd::bg_render_color(void *buf,int scanline)
