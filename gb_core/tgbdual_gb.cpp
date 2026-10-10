@@ -29,7 +29,7 @@ gb::gb(renderer *ref,bool b_lcd,bool b_apu)
 {
 	m_renderer=ref;
 
-	/* rom before lcd: lcd::set_palette(0) may call get_rom() for GBC colorization. */
+	/* rom before lcd: set_palette may call get_rom() for GBC colorization. */
 	m_rom=new rom();
 	m_lcd=new lcd(this);
 	m_apu=new apu(this);// ROMより後に作られたし // I was made ​​later than the ROM

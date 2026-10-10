@@ -26,7 +26,8 @@
 #include "dmg_gbc_palettes.h"
 #include <stdio.h>
 
-/* Index 0 in the UI is "GBC" (per-game BIOS colorization). These are 1..N. */
+/* Indices 0..N-1 are fixed palettes; last index (N) is "GBC" per-game BIOS
+ * colorization. Default index 0 = first fixed palette. */
 static word dmg_palettes[][4] = {
  	{ 0x7FFF, 0x56B5, 0x4631, 0x0000 }, // GB_TGBDUAL_PALETTE
  	{ 0x7FFF, 0x5AD6, 0x318C, 0x0000 }, // GB_2BGRAYS_PALETTE
@@ -68,14 +69,14 @@ char lcd::get_current_palette() {
 }
 
 char lcd::get_palette_count() {
-	/* +1 for index 0 = GBC per-game colorization (gnuboy / old retro-go). */
+	/* +1 for last index = GBC per-game colorization. */
 	return (char)(sizeof(dmg_palettes)/sizeof(dmg_palettes[0]) + 1);
 }
 
 void lcd::set_palette(char index)
 {
 	int ncustom = (int)(sizeof(dmg_palettes)/sizeof(dmg_palettes[0]));
-	int max = ncustom; /* valid indices 0..ncustom (0 = GBC) */
+	int max = ncustom; /* valid indices 0..ncustom-1 fixed, ncustom = GBC */
 	if (index < 0)
 		index = 0;
 	if (index > max)
@@ -87,7 +88,7 @@ void lcd::set_palette(char index)
 	word bg[4], obp0[4], obp1[4];
 
 	/* Guard: get_rom() must exist (rom constructed before lcd) and be loaded. */
-	if (index == 0 && ref_gb->get_rom() != NULL &&
+	if (index == ncustom && ref_gb->get_rom() != NULL &&
 	    ref_gb->get_rom()->get_loaded()) {
 		/* Same algorithm as gnuboy pal_detect_dmg / CGB boot ROM. */
 		const byte *rom = ref_gb->get_rom()->get_rom();
@@ -129,10 +130,8 @@ void lcd::set_palette(char index)
 		printf("lcd: GBC colorization palette %u (checksum 0x%02X)\n",
 		       (unsigned)pal, (unsigned)checksum);
 	} else {
-		/* No ROM yet (ctor), or fixed custom palette 1..N → dmg_palettes[N-1]. */
-		int custom = (index == 0) ? 0 : (index - 1);
-		if (custom < 0 || custom >= ncustom)
-			custom = 0;
+		/* Fixed custom palette, or GBC requested before ROM is loaded. */
+		int custom = (index >= ncustom) ? 0 : (int)index;
 		for (int i = 0; i < 4; i++) {
 			bg[i] = dmg_palettes[custom][i];
 			obp0[i] = dmg_palettes[custom][i];

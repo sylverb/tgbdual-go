@@ -6,8 +6,7 @@
 /*
  * Game-specific DMG colorization tables from the Game Boy Color boot ROM.
  * Adapted from gnuboy-go / visualboyadvance-m. Used when the user picks
- * palette index 0 ("GBC") in classic GB mode — same as old retro-go gnuboy
- * (pal_detect_dmg).
+ * the last palette entry ("GBC") in classic GB mode (pal_detect_dmg).
  */
 
 /* [palette_id][slot 0/1/2][shade 0..3], BGR555. Slot usage depends on flags. */
