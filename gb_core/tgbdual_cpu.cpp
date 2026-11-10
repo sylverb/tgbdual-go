@@ -22,12 +22,10 @@
 // CPU emulation unit (I/O, IRQ, etc.)
 
 #include "gb.h"
+#include "tgbdual_sgb.h"
 #include <string.h>
 #ifdef TARGET_GNW
 #include "gw_malloc.h"
-#ifndef LINUX_EMU
-#include "heap.hpp"
-#endif
 #endif
 
 #define Z_FLAG 0x40
@@ -35,10 +33,73 @@
 #define N_FLAG 0x02
 #define C_FLAG 0x01
 
+/* DIV bit selected by TAC clock select (falling edge clocks TIMA). */
+static const int tac_div_shift[4] = {9, 3, 5, 7};
+
+void cpu::timer_inc_tima()
+{
+	ref_gb->get_regs()->TIMA++;
+	if (!ref_gb->get_regs()->TIMA) {
+		irq(INT_TIMER);
+		ref_gb->get_regs()->TIMA = ref_gb->get_regs()->TMA;
+	}
+}
+
+/* Advance the 16-bit DIV counter; clock TIMA on (enable & bit) 1->0 edges.
+ * O(1) edge count (gambatte/SameBoy style) — no per-edge walk of `cycles`. */
+void cpu::timer_advance(int cycles)
+{
+	if (cycles <= 0)
+		return;
+
+	byte tac = ref_gb->get_regs()->TAC;
+	unsigned old_div = (unsigned)div_clock & 0xffff;
+	unsigned end = old_div + (unsigned)cycles;
+
+	div_clock = (int)(end & 0xffff);
+	ref_gb->get_regs()->DIV = (div_clock >> 8) & 0xff;
+
+	if (!(tac & 0x04))
+		return;
+
+	unsigned period = 1u << (tac_div_shift[tac & 3] + 1); /* 1024, 16, 64, 256 */
+	/* Multiples of `period` in (old_div, end] == falling edges of bit N. */
+	unsigned ticks = (end / period) - (old_div / period);
+	while (ticks--)
+		timer_inc_tima();
+}
+
+void cpu::timer_on_tac_write(byte new_tac)
+{
+	byte old_tac = ref_gb->get_regs()->TAC;
+	unsigned old_mask = 1u << tac_div_shift[old_tac & 3];
+	unsigned new_mask = 1u << tac_div_shift[new_tac & 3];
+	bool old_sig = (old_tac & 0x04) && ((div_clock & old_mask) != 0);
+	bool new_sig = (new_tac & 0x04) && ((div_clock & new_mask) != 0);
+	if (old_sig && !new_sig)
+		timer_inc_tima();
+	ref_gb->get_regs()->TAC = new_tac;
+}
+
+void cpu::timer_on_div_write()
+{
+	byte tac = ref_gb->get_regs()->TAC;
+	unsigned mask = 1u << tac_div_shift[tac & 3];
+	bool old_sig = (tac & 0x04) && ((div_clock & mask) != 0);
+	div_clock = 0;
+	ref_gb->get_regs()->DIV = 0;
+	/* Clearing DIV while the AND result was high is a falling edge. */
+	if (old_sig)
+		timer_inc_tima();
+}
+
 cpu::cpu(gb *ref)
 {
 	ref_gb=ref;
 	b_trace=false;
+	boot_rom_mapped=false;
+	boot_rom=NULL;
+	boot_rom_size=0;
 #ifdef TARGET_GNW
 	ram=NULL;
 	vram=NULL;
@@ -59,25 +120,18 @@ cpu::~cpu()
 #ifdef TARGET_GNW
 void cpu::init_ram()
 {
-#ifndef LINUX_EMU
-	heap_itc_alloc(true);
-#endif
-	if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
-#ifndef LINUX_EMU
-		ram = (byte *)heap_alloc_mem(0x2000*4);
-		vram = (byte *)heap_alloc_mem(0x2000*2);
-#else
-		ram = (byte *)itc_calloc(1,0x2000*4);
-		vram = (byte *)itc_calloc(1,0x2000*2);
-#endif
-	} else {
-#ifndef LINUX_EMU
-		ram = (byte *)heap_alloc_mem(0x2000);
-		vram = (byte *)heap_alloc_mem(0x2000);
-#else
-		ram = (byte *)itc_calloc(1,0x2000);
-		vram = (byte *)itc_calloc(1,0x2000);
-#endif
+	/* Prefer CGB-sized WRAM/VRAM when a GBC boot ROM is available so the
+	 * System menu can switch DMG→GBC without realloc (no dtc_free). */
+	bool need_cgb = (ref_gb->get_rom()->get_info()->gb_type >= 3) ||
+	                ref_gb->has_cgb_boot_rom();
+	if (ram == NULL) {
+		if (need_cgb) {
+			ram = (byte *)dtc_calloc(1, 0x2000*4);
+			vram = (byte *)dtc_calloc(1, 0x2000*2);
+		} else {
+			ram = (byte *)dtc_calloc(1, 0x2000);
+			vram = (byte *)dtc_calloc(1, 0x2000);
+		}
 	}
 	vram_bank=vram;
 	ram_bank=ram+0x1000;
@@ -86,13 +140,63 @@ void cpu::init_ram()
 
 void cpu::reset()
 {
-	regs.AF.w=(ref_gb->get_rom()->get_info()->gb_type>=3)?0x11b0:0x01b0;
-	regs.BC.w=(ref_gb->get_rom()->get_info()->gb_type>=4)?0x0113:0x0013;
-	regs.DE.w=0x00D8;
-	regs.HL.w=0x014D;
-	regs.I=0;
-	regs.SP=0xFFFE;
-	regs.PC=0x100;
+	boot_rom_mapped = false;
+	boot_rom = NULL;
+	boot_rom_size = 0;
+
+	int gb_type = ref_gb->get_rom()->get_loaded()
+	              ? ref_gb->get_rom()->get_info()->gb_type : 1;
+
+	if (gb_type >= 3 && ref_gb->has_cgb_boot_rom()) {
+		boot_rom = ref_gb->get_cgb_boot_rom();
+		boot_rom_size = ref_gb->get_cgb_boot_rom_size();
+		boot_rom_mapped = true;
+	} else if (gb_type < 3 && ref_gb->has_dmg_boot_rom()) {
+		boot_rom = ref_gb->get_dmg_boot_rom();
+		boot_rom_size = ref_gb->get_dmg_boot_rom_size();
+		boot_rom_mapped = true;
+	}
+
+	if (boot_rom_mapped) {
+		/* Power-on CPU state; boot ROM runs from $0000. */
+		regs.AF.w = 0;
+		regs.BC.w = 0;
+		regs.DE.w = 0;
+		regs.HL.w = 0;
+		regs.I = 0;
+		regs.SP = 0;
+		regs.PC = 0;
+	} else if (gb_type >= 4) {
+		/* AGB as CGB — post-boot registers per Pan Docs. */
+		regs.AF.w = 0x1100;
+		regs.BC.w = 0x0100;
+		regs.DE.w = 0x0008;
+		regs.HL.w = 0x000D;
+		regs.I = 0;
+		regs.SP = 0xFFFE;
+		regs.PC = 0x100;
+	} else if (gb_type >= 3) {
+		/* Asteroids (ModRetro Chromatic) checks D!=0 to accept CGB. */
+		regs.AF.w = 0x1180;
+		regs.BC.w = 0x0000;
+		regs.DE.w = 0xFF56;
+		regs.HL.w = 0x000D;
+		regs.I = 0;
+		regs.SP = 0xFFFE;
+		regs.PC = 0x100;
+		/* DMG cart without boot ROM: OPRI=1 (DMG OBJ priority). KEY0 set in gb::reset. */
+		if (ref_gb->get_rom()->get_loaded() &&
+		    (ref_gb->get_rom()->get_rom()[0x143] & 0x80) == 0)
+			_ff6c = 1;
+	} else {
+		regs.AF.w = 0x01B0;
+		regs.BC.w = 0x0013;
+		regs.DE.w = 0x00D8;
+		regs.HL.w = 0x014D;
+		regs.I = 0;
+		regs.SP = 0xFFFE;
+		regs.PC = 0x100;
+	}
 
 	rest_clock=0;
 	total_clock=sys_clock=div_clock=0;
@@ -108,7 +212,7 @@ void cpu::reset()
 	int_disable=false;
 
 	if (ram != NULL) {
-		if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
+		if (gb_type >= 3 || ref_gb->has_cgb_boot_rom()) {
 			memset(ram,0,0x2000*4);
 		} else {
 			memset(ram,0,0x2000);
@@ -116,7 +220,7 @@ void cpu::reset()
 		ram_bank=ram+0x1000;
 	}
 	if (vram != NULL) {
-		if (ref_gb->get_rom()->get_info()->gb_type >= 3) {
+		if (gb_type >= 3 || ref_gb->has_cgb_boot_rom()) {
 			memset(vram,0,0x2000*2);
 		} else {
 			memset(vram,0,0x2000);
@@ -176,6 +280,15 @@ void cpu::restore_state_ex(int *dat)
 
 byte cpu::read_direct(word adr)
 {
+	if (boot_rom_mapped && boot_rom) {
+		if (adr < 0x100)
+			return boot_rom[adr];
+		/* CGB boot ROM also covers $0200-$08FF; $0100-$01FF stays cart header. */
+		if (boot_rom_size > 0x100 && adr >= 0x200 && adr < 0x900 &&
+		    adr < (word)boot_rom_size)
+			return boot_rom[adr];
+	}
+
 	switch(adr>>13){
 	case 0:
 	case 1:
@@ -278,6 +391,10 @@ byte cpu::io_read(word adr)
 		case 2:
 			return 0xE0|((tmp&0x80?0:1)|(tmp&0x40?0:2)|(tmp&0x20?0:4)|(tmp&0x10?0:8));
 		case 3:
+			/* SGB multipad: low nibble = player id; keep written select bits. */
+			if (ref_gb->get_sgb()&&ref_gb->get_sgb()->enabled())
+				return (byte)((ref_gb->get_regs()->P1&0xF0)|
+				              ref_gb->get_sgb()->multipad_nibble());
 			return 0xFF;
 		}
 		return 0x00;
@@ -323,6 +440,8 @@ byte cpu::io_read(word adr)
 		return ref_gb->get_regs()->WX;
 
 		//以下カラーでの追加 // Adding color below // TODO: continue translation
+	case 0xFF4C://KEY0 (CGB: DMG compatibility / PGB mode)
+		return ref_gb->get_key0();
 	case 0xFF4D://KEY1システムクロック変更 // KEY1 change system clock
 		return (speed?0x80:(ref_gb->get_cregs()->KEY1&1)?1:0x7E);
 	case 0xFF4F://VBK(内部VRAMバンク切り替え) // VBK (Internal bank switching VRAM)
@@ -426,6 +545,8 @@ void cpu::io_write(word adr,byte dat)
 {
 		switch(adr){
 		case 0xFF00://P1(パッド制御) // P1 (control pad)
+			if (ref_gb->get_sgb())
+				ref_gb->get_sgb()->joyp_write(dat);
 			ref_gb->get_regs()->P1=dat;
 			return;
 		case 0xFF01://SB(シリアルシリアル通信送受信) // SB (sending and receiving serial communication)
@@ -449,7 +570,8 @@ void cpu::io_write(word adr,byte dat)
 			}
 			return;
 		case 0xFF04://DIV(ディバイダー) // DIV (divider)
-			ref_gb->get_regs()->DIV=0;
+			/* Writing DIV resets the 16-bit divider (falling-edge may tick TIMA). */
+			timer_on_div_write();
 			return;
 		case 0xFF05://TIMA(タイマカウンタ) // TIMA (timer counter)
 			ref_gb->get_regs()->TIMA=dat;
@@ -460,30 +582,51 @@ void cpu::io_write(word adr,byte dat)
 //			sys_clock=0;
 			return;
 		case 0xFF07://TAC(タイマコントロール) // TAC (timer control)
-			if ((dat&0x04)&&!(ref_gb->get_regs()->TAC&0x04))
-				sys_clock=0;
-			ref_gb->get_regs()->TAC=dat;
+			/* Enable/clock changes can produce a falling edge on the TIMA input. */
+			timer_on_tac_write(dat);
 			return;
 		case 0xFF0F://IF(割りこみフラグ) // IF (Interrupt flag)
 			ref_gb->get_regs()->IF=dat;
 			return;
 		case 0xFF40://LCDC(LCDコントロール) // LCDC (LCD control)
-			if ((dat&0x80)&&(!(ref_gb->get_regs()->LCDC&0x80))){
+			/* LCD off: LY=0, mode 0, but do NOT recompare LYC (freeze coincidence).
+			 * Mr. Do turns the LCD off at LY==LYC then waits on STAT again; clearing
+			 * the coincidence flag here softlocks that wait. */
+			if (!(dat&0x80)&&(ref_gb->get_regs()->LCDC&0x80)){
 				ref_gb->get_regs()->LY=0;
+				ref_gb->get_regs()->STAT&=0xFC; /* mode 0, keep LYC flag */
+				ref_gb->stat_irq_line=false;
 				ref_gb->get_lcd()->clear_win_count();
 			}
+			else if ((dat&0x80)&&(!(ref_gb->get_regs()->LCDC&0x80))){
+				ref_gb->get_regs()->LY=0;
+				ref_gb->get_lcd()->clear_win_count();
+				if (ref_gb->get_regs()->LYC==0)
+					ref_gb->get_regs()->STAT|=0x04;
+				else
+					ref_gb->get_regs()->STAT&=(byte)~0x04;
+				ref_gb->update_stat_irq();
+			}
+			/* CGB: clearing WIN resets the WY latch (Pan Docs). */
+			if (ref_gb->get_rom()->get_info()->gb_type>=3 &&
+			    (ref_gb->get_regs()->LCDC&0x20) && !(dat&0x20))
+				ref_gb->get_lcd()->reset_wy_trigger();
 			ref_gb->get_regs()->LCDC=dat;
+			ref_gb->get_lcd()->check_wy_trigger();
 //			fprintf(file,"LCDC=%02X at line %d\n",dat,ref_gb->get_regs()->LY);
 			return;
 		case 0xFF41://STAT(LCDステータス) // STAT (LCD status)
-			if (ref_gb->get_rom()->get_info()->gb_type==1)
-				// オリジナルGBにおいてこのような現象が起こるらしい
-				// This phenomenon seems to occur in the original GB
-				if (!(ref_gb->get_regs()->STAT&0x02))
-					ref_gb->get_regs()->IF|=INT_LCDC;
-
-			ref_gb->get_regs()->STAT=(ref_gb->get_regs()->STAT&0x7)|(dat&0x78);
+		{
+			byte old=ref_gb->get_regs()->STAT;
+			ref_gb->get_regs()->STAT=(old&0x07)|(dat&0x78);
+			/* DMG STAT write quirk: writing STAT can raise the STAT line
+			 * even when enabling a source that is already active. Force a
+			 * falling edge first so update_stat_irq sees a rise (Legend of Zerd). */
+			if (ref_gb->get_rom()->get_info()->gb_type<3)
+				ref_gb->stat_irq_line=false;
+			ref_gb->update_stat_irq();
 			return;
+		}
 		case 0xFF42://SCY(スクロールY) // SCY (scroll Y)
 			ref_gb->get_regs()->SCY=dat;
 			return;
@@ -496,6 +639,14 @@ void cpu::io_write(word adr,byte dat)
 			return;
 		case 0xFF45://LYC(LY比較) // LYC (compare LY)
 			ref_gb->get_regs()->LYC=dat;
+			/* While LCD is off, LY/LYC coincidence is frozen (Mr. Do). */
+			if (ref_gb->get_regs()->LCDC&0x80){
+				if (ref_gb->get_regs()->LYC==ref_gb->get_regs()->LY)
+					ref_gb->get_regs()->STAT|=0x04;
+				else
+					ref_gb->get_regs()->STAT&=(byte)~0x04;
+				ref_gb->update_stat_irq();
+			}
 			return;
 		case 0xFF46://DMA(DMA転送) // DMA (DMA transfer)
 			switch(dat>>5){
@@ -530,7 +681,7 @@ void cpu::io_write(word adr,byte dat)
 			}
 			return;
 		case 0xFF47://BGP(背景パレット) // BGP (background palette)
-			ref_gb->get_regs()->BGP=dat;
+			ref_gb->get_lcd()->on_bgp_write(dat);
 			return;
 		case 0xFF48://OBP1(オブジェクトパレット1) // OBP1 (object palette 1)
 			ref_gb->get_regs()->OBP1=dat;
@@ -540,22 +691,32 @@ void cpu::io_write(word adr,byte dat)
 			return;
 		case 0xFF4A://WY(ウインドウY座標) // WY (window coordinates Y)
 			ref_gb->get_regs()->WY=dat;
+			ref_gb->get_lcd()->check_wy_trigger();
 			return;
 		case 0xFF4B://WX(ウインドウX座標) // WX (window coordinates X)
 			ref_gb->get_regs()->WX=dat;
 			return;
 
 			//以下カラーでの追加 // Add color below
+		case 0xFF4C://KEY0 (CGB: $04 = DMG compatibility mode for mono carts)
+			ref_gb->set_key0(dat);
+			return;
 		case 0xFF4D://KEY1システムクロック変更 // KEY1 change system clock
 //			speed=dat&1;
 			ref_gb->get_cregs()->KEY1=dat&1;
 			speed_change=dat&1;
 			return;
 		case 0xFF4F://VBK(内部VRAMバンク切り替え) // VBK (VRAM internal bank switching)
-			if (dma_executing)
+			/* DMG/SGB: register does not exist (gnuboy ignores these writes).
+			 * Applying the bank switch with only 8 KiB VRAM allocated hardfaults
+			 * (Patchy Matchy v1.1: DMG header but still pokes VBK). */
+			if (ref_gb->get_rom()->get_info()->gb_type < 3)
 				return;
 			vram_bank=vram+0x2000*(dat&0x01);
 			ref_gb->get_cregs()->VBK=dat;//&0x01;
+			return;
+		case 0xFF50://BANK (boot ROM disable) — any write unmaps the boot ROM
+			boot_rom_mapped = false;
 			return;
 		case 0xFF51://HDMA1(転送元上位) // HDMA1 (upper source)
 			dma_src&=0x00F0;
@@ -716,6 +877,8 @@ void cpu::io_write(word adr,byte dat)
 //			if (dma_executing)
 //				return;
 
+			if (ref_gb->get_rom()->get_info()->gb_type < 3)
+				return;
 			dat=(!(dat&7))?1:(dat&7);
 			ref_gb->get_cregs()->SVBK=dat;
 			ram_bank=ram+0x1000*dat;
@@ -961,23 +1124,20 @@ void cpu::exec(int clocks)
 	int tmp_clocks;
 	byte tmpb;
 	pare_reg tmp;
-	static const int timer_clocks[]={1024,16,64,256};
 
 	rest_clock+=clocks;
 
 	if (gdma_rest){
 		if (rest_clock<=gdma_rest){
 			gdma_rest-=rest_clock;
-			sys_clock+=rest_clock;
-			div_clock+=rest_clock;
 			total_clock+=rest_clock;
+			timer_advance(rest_clock);
 			rest_clock=0;
 		}
 		else{
 			rest_clock-=gdma_rest;
-			sys_clock+=gdma_rest;
-			div_clock+=gdma_rest;
 			total_clock+=gdma_rest;
+			timer_advance(gdma_rest);
 			gdma_rest=0;
 		}
 	}
@@ -1004,25 +1164,8 @@ void cpu::exec(int clocks)
 		}
 
 		rest_clock-=tmp_clocks;
-		div_clock+=tmp_clocks;
 		total_clock+=tmp_clocks;
-
-		if (ref_gb->get_regs()->TAC&0x04){//タイマ割りこみ // Timer interrupt
-			sys_clock+=tmp_clocks;
-			if (sys_clock>timer_clocks[ref_gb->get_regs()->TAC&0x03]){
-				sys_clock&=timer_clocks[ref_gb->get_regs()->TAC&0x03]-1;
-				ref_gb->get_regs()->TIMA++;
-				if (!ref_gb->get_regs()->TIMA){
-					irq(INT_TIMER);
-					ref_gb->get_regs()->TIMA=ref_gb->get_regs()->TMA;
-				}
-			}
-		}
-
-		if (div_clock&0x100){
-			ref_gb->get_regs()->DIV-=div_clock>>8;
-			div_clock&=0xff;
-		}
+		timer_advance(tmp_clocks);
 
 		if (total_clock>seri_occer){
 			seri_occer=0x7fffffff;

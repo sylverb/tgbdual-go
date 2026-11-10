@@ -18,6 +18,8 @@ public:
 		my_mode = mode;
 		my_target.ptr = target;
 	}
+	mode_t mode() const { return my_mode; }
+
 	inline size_t process(void *data, size_t size)
 	{
 		switch(my_mode) {

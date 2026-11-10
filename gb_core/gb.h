@@ -20,11 +20,18 @@
 //--------------------------------------------------
 // GB クラス定義部,その他
 
+/* TARGET_GNW: the G&W port builds without libstdc++ (see
+ * Core/Src/porting/core_common/gw_core_cxx_support.cpp) — the `cheat`
+ * class below uses a small fixed-capacity array instead of
+ * std::list<cheat_dat> on this target, so this header isn't needed. */
+#ifndef TARGET_GNW
 #include <list>
+#endif
 
 #include "gb_types.h"
 #include "renderer.h"
 #include "serializer.h"
+#include <stddef.h>
 
 #define INT_VBLANK 1
 #define INT_LCDC 2
@@ -44,6 +51,7 @@ class mbc;
 #if CHEAT_CODES == 1
 class cheat;
 #endif
+class sgb;
 
 struct ext_hook{
 	byte (*send)(byte);
@@ -173,6 +181,15 @@ struct rom_info {
 	int gb_type;
 };
 
+/* Savestate blob layout versions.
+ * v0 = layout before tgbdual-go b1882f1 (no header on disk).
+ * v1 = current layout (on disk preceded by GBST header).
+ *     SGB HLE state is included only when console_mode is SGB. */
+enum {
+	GB_SAVESTATE_V0 = 0,
+	GB_SAVESTATE_V1 = 1,
+};
+
 class gb
 {
 friend class cpu;
@@ -192,18 +209,44 @@ public:
 	gb *get_target() { return target; }
 	gb_regs *get_regs() { return &regs; }
 	gbc_regs *get_cregs() { return &c_regs; }
+	byte get_key0() const { return key0; }
+	void set_key0(byte v) { key0 = v; }
 
 	void run();
 	void reset();
 	void set_skip(int frame);
 	void set_use_gba(bool use) { use_gba=use; }
+	/* GB_CONSOLE_DMG/CGB/SGB — applied on reset/load. */
+	void set_console_mode(int mode);
+	int get_console_mode() const { return console_mode; }
+	int resolve_gb_type() const;
+	/* DMG cart on CGB hardware (KEY0 DMG-compat): BGP/OBP index into CGB pals. */
+	bool dmg_compat_mode() const;
+	sgb *get_sgb() { return m_sgb; }
 	bool load_rom(byte *buf,int size,byte *ram,int ram_size, bool persistent);
 
-	void serialize(serializer &s);
+	/* Optional boot ROMs from /bios/gb/{gb,gbc}_bios.bin. NULL = skip to post-boot. */
+	void set_dmg_boot_rom(const byte *data, size_t size);
+	void set_cgb_boot_rom(const byte *data, size_t size);
+	bool has_dmg_boot_rom() const { return dmg_boot_rom != NULL; }
+	bool has_cgb_boot_rom() const { return cgb_boot_rom != NULL; }
+	const byte *get_dmg_boot_rom() const { return dmg_boot_rom; }
+	const byte *get_cgb_boot_rom() const { return cgb_boot_rom; }
+	size_t get_dmg_boot_rom_size() const { return dmg_boot_rom_size; }
+	size_t get_cgb_boot_rom_size() const { return cgb_boot_rom_size; }
+	bool will_use_boot_rom() const;
 
-	size_t get_state_size(void);
+	/* Evaluate STAT IRQ line (mode 0/1/2 + LYC OR'd). Rising edge => LCDC IF. */
+	void update_stat_irq();
+
+	void serialize(serializer &s, int version = GB_SAVESTATE_V1);
+
+	size_t get_state_size(int version = GB_SAVESTATE_V1);
+	/* v0/v1 size for a temporary gb_type (DMG vs GBC WRAM/VRAM). */
+	size_t get_state_size_for_type(int version, int gb_type);
 	void save_state_mem(void *buf);
 	void restore_state_mem(void *buf);
+	bool restore_state_mem(void *buf, int version);
 
 	void refresh_pal();
 
@@ -219,6 +262,7 @@ private:
 	rom *m_rom;
 	mbc *m_mbc;
 	renderer *m_renderer;
+	sgb *m_sgb;
 
 #if CHEAT_CODES == 1
 	cheat *m_cheat;
@@ -228,6 +272,8 @@ private:
 
 	gb_regs regs;
 	gbc_regs c_regs;
+	/* FF4C KEY0 — kept out of c_regs so savestate layout stays stable. */
+	byte key0;
 
 	word dmy[160*5]; // vframe はみ出した時用
 	word vframe[160*(144+100)];
@@ -240,6 +286,16 @@ private:
 
 	bool hook_ext;
 	bool use_gba;
+	int console_mode;
+
+	/* Optional Nintendo boot ROMs (not owned — lifetime = session). */
+	const byte *dmg_boot_rom;
+	size_t dmg_boot_rom_size;
+	const byte *cgb_boot_rom;
+	size_t cgb_boot_rom_size;
+
+	/* STAT IRQ line (OR of enabled mode/LYC sources). Rising edge => INT_LCDC. */
+	bool stat_irq_line;
 };
 
 #if CHEAT_CODES == 1
@@ -264,24 +320,33 @@ public:
 	void delete_cheat(char *name);
 	std::list<cheat_dat>::iterator find_cheat(char *name);
 	void create_unique_name(char *buf);
+	std::list<cheat_dat>::iterator get_first() { return cheat_list.begin(); }
+	std::list<cheat_dat>::iterator get_end() { return cheat_list.end(); }
 #endif
 
 	void clear();
-
-	std::list<cheat_dat>::iterator get_first() { return cheat_list.begin(); }
-	std::list<cheat_dat>::iterator get_end() { return cheat_list.end(); }
 
 #ifndef TARGET_GNW
 	int *get_cheat_map() { return cheat_map; }
 #endif
 
 private:
-	std::list<cheat_dat> cheat_list;
-#ifndef TARGET_GNW
-	int cheat_map[0x10000];
-#else
+#ifdef TARGET_GNW
+	/* Fixed-capacity replacement for std::list<cheat_dat> — this target
+	 * builds without libstdc++ (see
+	 * Core/Src/porting/core_common/gw_core_cxx_support.cpp). 32 covers
+	 * every individual GameShark/Game Genie code fragment across every
+	 * enabled cheat slot with a lot of headroom (MAX_CHEAT_CODES is 13
+	 * whole cheat *strings*, each almost always a single fragment — see
+	 * apply_cheat_code() in main_gb_tgbdual.cpp). */
+	static const int GNW_MAX_CHEAT_ENTRIES = 32;
+	cheat_dat cheat_list_storage[GNW_MAX_CHEAT_ENTRIES];
+	int cheat_list_count;
 	word upper_adr;
 	word lower_adr;
+#else
+	std::list<cheat_dat> cheat_list;
+	int cheat_map[0x10000];
 #endif
 	gb *ref_gb;
 };
@@ -295,19 +360,31 @@ public:
 
 	void render(void *buf,int scanline);
 	void reset();
-	void clear_win_count() { now_win_line=9; }
+	void clear_win_count() { now_win_line=9; wy_triggered=false; }
+	/* Latch WY when WIN is enabled and LY==WY (SameBoy / mGBA #409). */
+	void check_wy_trigger();
+	void reset_wy_trigger() { wy_triggered=false; }
 	word *get_pal(int num) { return col_pal[num]; }
 	word *get_mapped_pal(int num) { return mapped_pal[num]; }
 
 	char get_palette_count();
 	char get_current_palette();
 	void set_palette(char index);
+	/* Apply SGB palettes 0 (BG) and 1 (OBJ) as RGB565 via map_color. */
+	void apply_sgb_palettes(const word pals[4][4]);
+	bool sgb_colors_active() const { return sgb_color_active; }
+	word get_blank_color();
 	void set_enable(int layer,bool enable);
 	bool get_enable(int layer);
 
 	int get_sprite_count() { return sprite_count; };
 
-	void serialize(serializer &s);
+	/* Mid-scanline BGP (Prehistorik Man intro). DMG only; uses cpu total_clock. */
+	void begin_mode3(void *buf,int scanline);
+	void on_bgp_write(byte dat);
+	bool end_mode3(void *buf,int scanline);
+
+	void serialize(serializer &s, int version = GB_SAVESTATE_V1);
 private:
 	void bg_render(void *buf,int scanline);
 	void win_render(void *buf,int scanline);
@@ -315,9 +392,13 @@ private:
 	void bg_render_color(void *buf,int scanline);
 	void win_render_color(void *buf,int scanline);
 	void sprite_render_color(void *buf,int scanline);
+	void apply_bgp_range(void *buf,int scanline,int x0,int x1);
 
 	char cur_palette;
 	word m_pal16[4];
+	word m_obp_sgb[2][4]; /* OBJ0/OBJ1 when SGB palettes active */
+	word m_sgb_pal[4][4]; /* BG pals 0-3 when SGB ATTR active */
+	bool sgb_color_active;
 	word col_pal[16][4];
 	word mapped_pal[16][4];
 
@@ -325,10 +406,19 @@ private:
 	byte trans_tbl[160+160],priority_tbl[320];
 
 	int now_win_line;
+	bool wy_triggered;
 	int mul;
 	int sprite_count;
 
 	bool layer_enable[3];
+
+	/* Mid-line BGP state (active only while mode3_buf != NULL). */
+	int mode3_ly;
+	int mode3_x;
+	int mode3_base; /* cpu total_clock at begin_mode3 */
+	bool mode3_indexed;
+	bool mode3_used;
+	void *mode3_buf;
 
 	gb *ref_gb;
 };
@@ -420,7 +510,6 @@ public:
 	void set_page(int rom,int sram);
 	void set_bank(int bank);
 	void gb_rom_compress_load();
-	void rom_loadbank_cache(short bank);
 
 	byte read(word adr);
 	void write(word adr,byte dat);
@@ -428,9 +517,12 @@ public:
 	void ext_write(word adr,byte dat);
 	void reset();
 
-	void serialize(serializer &s);
+	void serialize(serializer &s, int version = GB_SAVESTATE_V1);
 private:
 	void mbc1_write(word adr,byte dat);
+	void mbc1m_write(word adr,byte dat);
+	void mbc1m_apply(bool update_bank0);
+	bool detect_mbc1m();
 	void mbc2_write(word adr,byte dat);
 	void mbc3_write(word adr,byte dat);
 	void mbc5_write(word adr,byte dat);
@@ -446,6 +538,7 @@ private:
 	int  current_bank;
 	bool mbc1_16_8;
 	byte mbc1_dat;
+	bool mbc1_multicart; /* MBC1M (MK I&II, Bomberman Collection, …) — set once at reset */
 
 	byte mbc3_latch; // 1 bits
 	byte mbc3_sec; // 6
@@ -541,6 +634,7 @@ public:
 	void reset();
 	void set_trace(bool trace) { b_trace=trace; }
 
+	bool is_boot_rom_mapped() const { return boot_rom_mapped; }
 	byte *get_vram() { return vram; }
 	byte *get_ram() { return ram; }
 	byte *get_oam() { return oam; }
@@ -565,6 +659,10 @@ public:
 private:
 	byte inline io_read(word adr);
 	void inline io_write(word adr,byte dat);
+	void timer_advance(int cycles);
+	void timer_inc_tima();
+	void timer_on_tac_write(byte new_tac);
+	void timer_on_div_write();
 	byte op_read() { return read(regs.PC++); }
 	word op_readw() { regs.PC+=2;return readw(regs.PC-2); }
 
@@ -609,4 +707,9 @@ private:
 	byte *dma_dest_bank;
 
 	byte _ff6c,_ff72,_ff73,_ff74,_ff75;
+
+	/* While true, 0x0000-0x00FF (and CGB 0x0200-0x08FF) map the boot ROM. */
+	bool boot_rom_mapped;
+	const byte *boot_rom;
+	size_t boot_rom_size;
 };

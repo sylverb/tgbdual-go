@@ -22,13 +22,18 @@
 // inline assembler あり 適宜変更せよ
 
 #include "gb.h"
+#include "tgbdual_sgb.h"
+#include "dmg_gbc_palettes.h"
+#include <stdio.h>
 
+/* Indices 0..N-1 are fixed palettes; last index (N) is "GBC" per-game BIOS
+ * colorization. Default index 0 = first fixed palette. */
 static word dmg_palettes[][4] = {
  	{ 0x7FFF, 0x56B5, 0x4631, 0x0000 }, // GB_TGBDUAL_PALETTE
  	{ 0x7FFF, 0x5AD6, 0x318C, 0x0000 }, // GB_2BGRAYS_PALETTE
  	{ 0x0272, 0x0DCA, 0x0D45, 0x0102 }, // GB_DMGREEN_PALETTE
  	{ 0x6BDD, 0x3ED4, 0x1D86, 0x0860 }, // GB_DEFAULT_PALETTE
- 	{ 0x6BFC, 0x3B12, 0x31C8, 0x1060 }, // GB_G&WDEFN_PALETTE
+ 	{ 0x6BFC, 0x3B11, 0x2DA7, 0x1061 }, // GB_G&WDEFN_PALETTE
  	{ 0x5BFF, 0x3F0F, 0x222D, 0x10EB }, // GB_LINKSAW_PALETTE
  	{ 0x639E, 0x263A, 0x10D4, 0x2866 }, // GB_NSUPRGB_PALETTE
  	{ 0x36D5, 0x260E, 0x1D47, 0x18C4 }, // GB_NGBARNE_PALETTE
@@ -49,6 +54,7 @@ lcd::lcd(gb *ref)
 {
 	ref_gb=ref;
 
+	sgb_color_active=false;
 	set_palette(0); // Default GB palette
 
 	reset();
@@ -63,15 +69,117 @@ char lcd::get_current_palette() {
 }
 
 char lcd::get_palette_count() {
-	return sizeof(dmg_palettes)/sizeof(dmg_palettes[0]);
+	/* +1 for last index = GBC per-game colorization. */
+	return (char)(sizeof(dmg_palettes)/sizeof(dmg_palettes[0]) + 1);
 }
 
 void lcd::set_palette(char index)
 {
+	int ncustom = (int)(sizeof(dmg_palettes)/sizeof(dmg_palettes[0]));
+	int max = ncustom; /* valid indices 0..ncustom-1 fixed, ncustom = GBC */
+	if (index < 0)
+		index = 0;
+	if (index > max)
+		index = (char)max;
+
 	cur_palette = index;
-	for (int i=0;i<4;i++){
-		m_pal16[i]=ref_gb->get_renderer()->map_color(dmg_palettes[index][i]);
+	sgb_color_active = false;
+
+	word bg[4], obp0[4], obp1[4];
+
+	/* Guard: get_rom() must exist (rom constructed before lcd) and be loaded. */
+	if (index == ncustom && ref_gb->get_rom() != NULL &&
+	    ref_gb->get_rom()->get_loaded()) {
+		/* Same algorithm as gnuboy pal_detect_dmg / CGB boot ROM. */
+		const byte *rom = ref_gb->get_rom()->get_rom();
+		uint8_t checksum = 0;
+		for (int i = 0; i < 16; i++)
+			checksum = (uint8_t)(checksum + rom[0x0134 + i]);
+
+		uint8_t infoIdx = 0;
+		for (size_t idx = 0; idx < sizeof(colorization_checksum); idx++) {
+			if (colorization_checksum[idx] == checksum) {
+				infoIdx = (uint8_t)idx;
+				if (idx > 0x40) {
+					for (size_t i = idx - 0x41, j = 0;
+					     i < sizeof(colorization_disambig_chars);
+					     i += 14, j += 14) {
+						if (rom[0x0137] == colorization_disambig_chars[i]) {
+							infoIdx = (uint8_t)(infoIdx + j);
+							break;
+						}
+					}
+				}
+				break;
+			}
+		}
+
+		uint8_t pal = (uint8_t)(colorization_palette_info[infoIdx] & 0x1F);
+		uint8_t flags = (uint8_t)((colorization_palette_info[infoIdx] & 0xE0) >> 5);
+		const uint16_t *bgp = dmg_game_palettes[pal][2];
+		const uint16_t *o0 = dmg_game_palettes[pal][(flags & 1) ? 0 : 1];
+		const uint16_t *o1 = dmg_game_palettes[pal][(flags & 2) ? 0 : 1];
+		if (!(flags & 4))
+			o1 = dmg_game_palettes[pal][2];
+
+		for (int i = 0; i < 4; i++) {
+			bg[i] = (word)(bgp[i] & 0x7FFF);
+			obp0[i] = (word)(o0[i] & 0x7FFF);
+			obp1[i] = (word)(o1[i] & 0x7FFF);
+		}
+		printf("lcd: GBC colorization palette %u (checksum 0x%02X)\n",
+		       (unsigned)pal, (unsigned)checksum);
+	} else {
+		/* Fixed custom palette, or GBC requested before ROM is loaded. */
+		int custom = (index >= ncustom) ? 0 : (int)index;
+		for (int i = 0; i < 4; i++) {
+			bg[i] = dmg_palettes[custom][i];
+			obp0[i] = dmg_palettes[custom][i];
+			obp1[i] = dmg_palettes[custom][i];
+		}
 	}
+
+	for (int i = 0; i < 4; i++) {
+		m_pal16[i] = ref_gb->get_renderer()->map_color(bg[i]);
+		/* Sprite path uses m_obp_sgb for DMG (incl. GBC colorization). */
+		m_obp_sgb[0][i] = ref_gb->get_renderer()->map_color(obp0[i]);
+		m_obp_sgb[1][i] = ref_gb->get_renderer()->map_color(obp1[i]);
+	}
+}
+
+void lcd::apply_sgb_palettes(const word pals[4][4])
+{
+	sgb_color_active=true;
+	for (int p = 0; p < 4; p++) {
+		for (int i = 0; i < 4; i++) {
+			word c = pals[p][i] & 0x7FFF;
+			m_sgb_pal[p][i] = ref_gb->get_renderer()->map_color(c);
+		}
+	}
+	/* Fallback mono path uses palette 0. Real SGB OBJ coloring uses the
+	 * ATTR map at each pixel (see sprite_render) — not a fixed palette 1. */
+	for (int i = 0; i < 4; i++) {
+		m_pal16[i] = m_sgb_pal[0][i];
+		m_obp_sgb[0][i] = m_sgb_pal[0][i];
+		m_obp_sgb[1][i] = m_sgb_pal[0][i];
+	}
+}
+
+word lcd::get_blank_color()
+{
+	if (ref_gb->get_rom()->get_info()->gb_type >= 3)
+		return mapped_pal[0][0];
+	return m_pal16[ref_gb->get_regs()->BGP & 0x3];
+}
+
+void lcd::check_wy_trigger()
+{
+	/* Window Y condition latches only when WIN is on and LY==WY.
+	 * Enabling WIN after LY has already passed WY must not show the
+	 * window (mGBA #409 / Warriors of Might and Magic). */
+	if ((ref_gb->get_regs()->LCDC&0x20) &&
+	    ref_gb->get_regs()->WY==ref_gb->get_regs()->LY)
+		wy_triggered=true;
 }
 
 void lcd::set_enable(int layer,bool enable)
@@ -86,9 +194,98 @@ bool lcd::get_enable(int layer)
 
 void lcd::reset()
 {
+	sgb_color_active=false;
 	now_win_line=0;
+	wy_triggered=false;
 	layer_enable[0]=layer_enable[1]=layer_enable[2]=true;
 	sprite_count=0;
+	mode3_ly=0;
+	mode3_x=0;
+	mode3_base=0;
+	mode3_indexed=false;
+	mode3_used=false;
+	mode3_buf=NULL;
+}
+
+void lcd::begin_mode3(void *buf,int scanline)
+{
+	check_wy_trigger();
+	mode3_ly=scanline;
+	mode3_x=0;
+	mode3_indexed=false;
+	mode3_used=false;
+	mode3_buf=buf;
+	/* Snapshot — no per-instruction counter in cpu::exec(). */
+	mode3_base=ref_gb->get_cpu()->get_clock();
+}
+
+void lcd::apply_bgp_range(void *buf,int scanline,int x0,int x1)
+{
+	if (x0<0) x0=0;
+	if (x1>160) x1=160;
+	if (x0>=x1) return;
+	word pal[4];
+	byte bgp=ref_gb->get_regs()->BGP;
+	pal[0]=m_pal16[bgp&0x3];
+	pal[1]=m_pal16[(bgp>>2)&0x3];
+	pal[2]=m_pal16[(bgp>>4)&0x3];
+	pal[3]=m_pal16[(bgp>>6)&0x3];
+	word *dat=((word*)buf)+scanline*160;
+	byte *trans=trans_tbl;
+	for (int i=x0;i<x1;i++)
+		dat[i]=pal[trans[i]&3];
+}
+
+void lcd::on_bgp_write(byte dat)
+{
+	/* Fast path: CGB, or not in a tracked DMG scanline. */
+	if (!mode3_buf){
+		ref_gb->get_regs()->BGP=dat;
+		return;
+	}
+
+	/* total_clock is updated after the op; BGP writes happen mid-op
+	 * (ld [hl],r ≈ 8 cycles, write near the end). +8 matches the old
+	 * pre-increment of mode3_clock before the instruction. */
+	int elapsed=ref_gb->get_cpu()->get_clock()-mode3_base+8;
+	int penalty=80+6+(ref_gb->get_regs()->SCX&7);
+	int x=elapsed-penalty;
+	if (x<0) x=0;
+	if (x>160) x=160;
+	if (x<mode3_x) x=mode3_x;
+
+	if (!mode3_indexed){
+		/* Rasterise colour indices once (bg+win); palette applied in spans. */
+		bg_render(mode3_buf,mode3_ly);
+		win_render(mode3_buf,mode3_ly);
+		mode3_indexed=true;
+	}
+
+	/* [mode3_x, x) already has the previous BGP. */
+	ref_gb->get_regs()->BGP=dat;
+	if (x<160)
+		apply_bgp_range(mode3_buf,mode3_ly,x,160);
+	mode3_x=x;
+	mode3_used=true;
+}
+
+bool lcd::end_mode3(void *buf,int scanline)
+{
+	if (!mode3_used){
+		mode3_buf=NULL;
+		return false;
+	}
+	/* Finish any remaining pixels with current BGP, then sprites. */
+	if (!mode3_indexed){
+		bg_render(buf,scanline);
+		win_render(buf,scanline);
+	}
+	else if (mode3_x<160)
+		apply_bgp_range(buf,scanline,mode3_x,160);
+	sprite_render(buf,scanline);
+	mode3_buf=NULL;
+	mode3_used=false;
+	return true;
 }
 
 void lcd::bg_render(void *buf,int scanline)
@@ -104,13 +301,18 @@ void lcd::bg_render(void *buf,int scanline)
 	word pal[4];
 	byte tile;
 
+	/* WX<8 => window starts at X<=0 and covers the line — but only if the
+	 * WY latch is set (not merely WY<=LY). */
+	bool win_covers = (wy_triggered&&
+	                   ref_gb->get_regs()->WX<8&&
+	                   (ref_gb->get_regs()->LCDC&0x20));
 	if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x01)||
-		(ref_gb->get_regs()->WY<=(dword)scanline&&ref_gb->get_regs()->WX<8&&(ref_gb->get_regs()->LCDC&0x20)))
+		win_covers)
 	{
 		if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x01))
 		{
 			word *tmp_w=(word*)buf+160*scanline;
-			word tmp_dat=ref_gb->get_renderer()->map_color(0x7fff);
+			word tmp_dat=get_blank_color();
 			for (int t=0;t<160;t++)
 				*(tmp_w++)=tmp_dat;
 		}
@@ -144,7 +346,31 @@ void lcd::bg_render(void *buf,int scanline)
 	now_share=(word*)(vrams[0]+share+((y&7)<<1));
 	now_pat=(word*)(vrams[0]+pat+((y&7)<<1));
 
+	/* SGB per-tile attribute palette. Hoist the row pointer / scanline row /
+	 * BGP out of the tile loop (constant across the scanline) and only rebuild
+	 * pal[] when the attribute palette index actually changes. */
+	const byte *sgb_am = 0;
+	int sgb_row = 0;
+	word sgb_bgp = 0;
+	int sgb_pi = -1;
+	if (sgb_color_active) {
+		sgb_am = ref_gb->get_sgb()->attr_map();
+		int aty = scanline >> 3;
+		if (aty > 17) aty = 17;
+		sgb_row = aty * 20;
+		sgb_bgp = ref_gb->get_regs()->BGP;
+	}
+
 	tile=*(now_tile++);
+	if (sgb_color_active) {
+		int pi = sgb_am[sgb_row] & 3;
+		word *sp = m_sgb_pal[pi];
+		pal[0] = sp[sgb_bgp & 3];
+		pal[1] = sp[(sgb_bgp >> 2) & 3];
+		pal[2] = sp[(sgb_bgp >> 4) & 3];
+		pal[3] = sp[(sgb_bgp >> 6) & 3];
+		sgb_pi = pi;
+	}
 	tmp_dat=(tile&0x80)?*(now_share+(tile<<3)):*(now_pat+(tile<<3));
 	calc1=tmp_dat;
 	calc2=tmp_dat>>7;
@@ -180,7 +406,7 @@ void lcd::bg_render(void *buf,int scanline)
 
 	for (i=0;i<8-(x&7);i++){ // スクロール補正 // Scroll correction
 		*(dat)=*(dat+(x&7));
-		*(trans)=*(dat+(x&7));
+		*(trans)=*(trans+(x&7));
 		dat++; trans++;
 	}
 
@@ -190,6 +416,18 @@ void lcd::bg_render(void *buf,int scanline)
 			prefix=256;
 		}
 		tile=*(now_tile++);
+		if (sgb_color_active) {
+			int atx = i < 19 ? (i + 1) : 19;
+			int pi = sgb_am[sgb_row + atx] & 3;
+			if (pi != sgb_pi) {
+				word *sp = m_sgb_pal[pi];
+				pal[0] = sp[sgb_bgp & 3];
+				pal[1] = sp[(sgb_bgp >> 2) & 3];
+				pal[2] = sp[(sgb_bgp >> 4) & 3];
+				pal[3] = sp[(sgb_bgp >> 6) & 3];
+				sgb_pi = pi;
+			}
+		}
 		tmp_dat=(tile&0x80)?*(now_share+(tile<<3)):*(now_pat+(tile<<3));
 		calc1=tmp_dat;
 		calc2=tmp_dat>>7;
@@ -224,7 +462,7 @@ void lcd::bg_render(void *buf,int scanline)
 
 void lcd::win_render(void *buf,int scanline)
 {
-	if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x20)||ref_gb->get_regs()->WY>=(scanline+1)||ref_gb->get_regs()->WX>166){
+	if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x20)||!wy_triggered||ref_gb->get_regs()->WX>166){
 //		if ((ref_gb->get_regs()->WY>=(scanline+1))&&((ref_gb->get_regs()->LCDC&0x21)!=0x21))
 //			memset(((word*)buf)+160*scanline,0,160*2);
 		return;
@@ -241,21 +479,54 @@ void lcd::win_render(void *buf,int scanline)
 	word *dat=(word*)buf;
 	byte tile;
 	int i;
+	/* WX 0..6: start at X=0 (gbe-plus / Star Wars Episode I Racer). */
+	int win_x=(ref_gb->get_regs()->WX<7)?0:(ref_gb->get_regs()->WX-7);
 
 	pal[0]=m_pal16[ref_gb->get_regs()->BGP&0x3];
 	pal[1]=m_pal16[(ref_gb->get_regs()->BGP>>2)&0x3];
 	pal[2]=m_pal16[(ref_gb->get_regs()->BGP>>4)&0x3];
 	pal[3]=m_pal16[(ref_gb->get_regs()->BGP>>6)&0x3];
-	dat+=160*scanline+ref_gb->get_regs()->WX-7;
-	trans+=ref_gb->get_regs()->WX-7;
+	dat+=160*scanline+win_x;
+	trans+=win_x;
 	byte *now_tile=ref_gb->get_cpu()->get_vram()+back+(((y>>3)-1)<<5);
 	word *now_share=(word*)(ref_gb->get_cpu()->get_vram()+share+((y&7)<<1));
 	word *now_pat=(word*)(ref_gb->get_cpu()->get_vram()+pat+((y&7)<<1));
 	dword tmp_dat;
 	dword calc1,calc2;
 
-	for (i=ref_gb->get_regs()->WX>>3;i<21;i++){
+	/* SGB: window cells obey the same 20×18 attribute map as the BG. Indexed by
+	 * screen position (WX-7 + 8*column), one lookup per tile, palette rebuilt
+	 * only when the attribute index changes. */
+	const byte *sgb_am = 0;
+	int sgb_row = 0;
+	word sgb_bgp = 0;
+	int sgb_pi = -1;
+	int sgb_sx = win_x;
+	if (sgb_color_active) {
+		sgb_am = ref_gb->get_sgb()->attr_map();
+		int aty = scanline >> 3;
+		if (aty > 17) aty = 17;
+		sgb_row = aty * 20;
+		sgb_bgp = ref_gb->get_regs()->BGP;
+	}
+
+	for (i=win_x>>3;i<21;i++){
 		tile=*(now_tile++);
+		if (sgb_color_active) {
+			int atx = sgb_sx >> 3;
+			if (atx < 0) atx = 0;
+			else if (atx > 19) atx = 19;
+			sgb_sx += 8;
+			int pi = sgb_am[sgb_row + atx] & 3;
+			if (pi != sgb_pi) {
+				word *sp = m_sgb_pal[pi];
+				pal[0] = sp[sgb_bgp & 3];
+				pal[1] = sp[(sgb_bgp >> 2) & 3];
+				pal[2] = sp[(sgb_bgp >> 4) & 3];
+				pal[3] = sp[(sgb_bgp >> 6) & 3];
+				sgb_pi = pi;
+			}
+		}
 		tmp_dat=(tile&0x80)?*(now_share+(tile<<3)):*(now_pat+(tile<<3));
 		calc1=tmp_dat;
 		calc2=tmp_dat>>7;
@@ -302,20 +573,61 @@ void lcd::sprite_render(void *buf,int scanline)
 	bool sp_size=(ref_gb->get_regs()->LCDC&0x04)?true:false;
 	int palnum;
 
-	pal[0][0]=m_pal16[ref_gb->get_regs()->OBP1&0x3];
-	pal[0][1]=m_pal16[(ref_gb->get_regs()->OBP1>>2)&0x3];
-	pal[0][2]=m_pal16[(ref_gb->get_regs()->OBP1>>4)&0x3];
-	pal[0][3]=m_pal16[(ref_gb->get_regs()->OBP1>>6)&0x3];
+	/* OBP0/OBP1 → gray shade (SNES palette index). SGB applies ATTR on top. */
+	byte sh0[4], sh1[4];
+	byte obp0 = ref_gb->get_regs()->OBP1;
+	byte obp1 = ref_gb->get_regs()->OBP2;
+	sh0[0] = (byte)(obp0 & 3);
+	sh0[1] = (byte)((obp0 >> 2) & 3);
+	sh0[2] = (byte)((obp0 >> 4) & 3);
+	sh0[3] = (byte)((obp0 >> 6) & 3);
+	sh1[0] = (byte)(obp1 & 3);
+	sh1[1] = (byte)((obp1 >> 2) & 3);
+	sh1[2] = (byte)((obp1 >> 4) & 3);
+	sh1[3] = (byte)((obp1 >> 6) & 3);
+	const byte *sh = sh0;
 
-	pal[1][0]=m_pal16[ref_gb->get_regs()->OBP2&0x3];
-	pal[1][1]=m_pal16[(ref_gb->get_regs()->OBP2>>2)&0x3];
-	pal[1][2]=m_pal16[(ref_gb->get_regs()->OBP2>>4)&0x3];
-	pal[1][3]=m_pal16[(ref_gb->get_regs()->OBP2>>6)&0x3];
+	const byte *sgb_am = 0;
+	int sgb_row = 0;
+	if (sgb_color_active) {
+		/* Real SGB: every LCD pixel (BG and OBJ) is colorized from the ATTR
+		 * map at its screen position. OBJ cannot pick a separate palette. */
+		sgb_am = ref_gb->get_sgb()->attr_map();
+		int aty = scanline >> 3;
+		if (aty > 17) aty = 17;
+		sgb_row = aty * 20;
+	} else {
+		/* DMG / GBC-colorization: pre-mapped RGB in m_obp_sgb. */
+		pal[0][0]=m_obp_sgb[0][sh0[0]];
+		pal[0][1]=m_obp_sgb[0][sh0[1]];
+		pal[0][2]=m_obp_sgb[0][sh0[2]];
+		pal[0][3]=m_obp_sgb[0][sh0[3]];
+		pal[1][0]=m_obp_sgb[1][sh1[0]];
+		pal[1][1]=m_obp_sgb[1][sh1[1]];
+		pal[1][2]=m_obp_sgb[1][sh1[2]];
+		pal[1][3]=m_obp_sgb[1][sh1[3]];
+	}
+
+	/* Put sprite color index cidx at screen x sx into *dest. */
+#define SPR_PUT(dest, sx, cidx) do { \
+		int _c = (int)(cidx); \
+		if (_c) { \
+			if (sgb_color_active) { \
+				int _atx = (sx) >> 3; \
+				if (_atx < 0) _atx = 0; \
+				else if (_atx > 19) _atx = 19; \
+				*(dest) = m_sgb_pal[sgb_am[sgb_row + _atx] & 3][sh[_c]]; \
+			} else { \
+				*(dest) = cur_p[_c]; \
+			} \
+		} \
+	} while (0)
 
 	for (i=39;i>=0;i--){
 		tile=oam[i*4+2];
 		atr=oam[i*4+3];
 		palnum=(atr>>4)&1;
+		sh = palnum ? sh1 : sh0;
 		cur_p=pal[palnum];
 
 		if (sp_size){ // 8*16
@@ -365,47 +677,48 @@ void lcd::sprite_render(void *buf,int scanline)
 
 		if (x<0){ // クリッピング処理
 			if (atr&0x80){ // プライオリティ(背面に)
-				if ((-x)<=1) if (!trans_tbl[x+1]) if (l1>>6) *(now_pos+1)=cur_p[l1>>6];
-				if ((-x)<=2) if (!trans_tbl[x+2]) if ((l2>>4)&3) *(now_pos+2)=cur_p[(l2>>4)&3];
-				if ((-x)<=3) if (!trans_tbl[x+3]) if ((l1>>4)&3) *(now_pos+3)=cur_p[(l1>>4)&3];
-				if ((-x)<=4) if (!trans_tbl[x+4]) if ((l2>>2)&3) *(now_pos+4)=cur_p[(l2>>2)&3];
-				if ((-x)<=5) if (!trans_tbl[x+5]) if ((l1>>2)&3) *(now_pos+5)=cur_p[(l1>>2)&3];
-				if ((-x)<=6) if (!trans_tbl[x+6]) if (l2&3) *(now_pos+6)=cur_p[l2&3];
-				if ((-x)<=7) if (!trans_tbl[x+7]) if (l1&3) *(now_pos+7)=cur_p[l1&3];
+				if ((-x)<=1) if (!trans_tbl[x+1]) SPR_PUT(now_pos+1, x+1, l1>>6);
+				if ((-x)<=2) if (!trans_tbl[x+2]) SPR_PUT(now_pos+2, x+2, (l2>>4)&3);
+				if ((-x)<=3) if (!trans_tbl[x+3]) SPR_PUT(now_pos+3, x+3, (l1>>4)&3);
+				if ((-x)<=4) if (!trans_tbl[x+4]) SPR_PUT(now_pos+4, x+4, (l2>>2)&3);
+				if ((-x)<=5) if (!trans_tbl[x+5]) SPR_PUT(now_pos+5, x+5, (l1>>2)&3);
+				if ((-x)<=6) if (!trans_tbl[x+6]) SPR_PUT(now_pos+6, x+6, l2&3);
+				if ((-x)<=7) if (!trans_tbl[x+7]) SPR_PUT(now_pos+7, x+7, l1&3);
 			}
 			else{
-				if ((-x)<=1) if (l1>>6) *(now_pos+1)=cur_p[l1>>6];
-				if ((-x)<=2) if ((l2>>4)&3) *(now_pos+2)=cur_p[(l2>>4)&3];
-				if ((-x)<=3) if ((l1>>4)&3) *(now_pos+3)=cur_p[(l1>>4)&3];
-				if ((-x)<=4) if ((l2>>2)&3) *(now_pos+4)=cur_p[(l2>>2)&3];
-				if ((-x)<=5) if ((l1>>2)&3) *(now_pos+5)=cur_p[(l1>>2)&3];
-				if ((-x)<=6) if (l2&3) *(now_pos+6)=cur_p[l2&3];
-				if ((-x)<=7) if (l1&3) *(now_pos+7)=cur_p[l1&3];
+				if ((-x)<=1) SPR_PUT(now_pos+1, x+1, l1>>6);
+				if ((-x)<=2) SPR_PUT(now_pos+2, x+2, (l2>>4)&3);
+				if ((-x)<=3) SPR_PUT(now_pos+3, x+3, (l1>>4)&3);
+				if ((-x)<=4) SPR_PUT(now_pos+4, x+4, (l2>>2)&3);
+				if ((-x)<=5) SPR_PUT(now_pos+5, x+5, (l1>>2)&3);
+				if ((-x)<=6) SPR_PUT(now_pos+6, x+6, l2&3);
+				if ((-x)<=7) SPR_PUT(now_pos+7, x+7, l1&3);
 			}
 		}
 		else{
 			if (atr&0x80){
-				if (!trans_tbl[x+0]) if (l2>>6) *(now_pos)=cur_p[l2>>6];
-				if (!trans_tbl[x+1]) if (l1>>6) *(now_pos+1)=cur_p[l1>>6];
-				if (!trans_tbl[x+2]) if ((l2>>4)&3) *(now_pos+2)=cur_p[(l2>>4)&3];
-				if (!trans_tbl[x+3]) if ((l1>>4)&3) *(now_pos+3)=cur_p[(l1>>4)&3];
-				if (!trans_tbl[x+4]) if ((l2>>2)&3) *(now_pos+4)=cur_p[(l2>>2)&3];
-				if (!trans_tbl[x+5]) if ((l1>>2)&3) *(now_pos+5)=cur_p[(l1>>2)&3];
-				if (!trans_tbl[x+6]) if (l2&3) *(now_pos+6)=cur_p[l2&3];
-				if (!trans_tbl[x+7]) if (l1&3) *(now_pos+7)=cur_p[l1&3];
+				if (!trans_tbl[x+0]) SPR_PUT(now_pos,   x+0, l2>>6);
+				if (!trans_tbl[x+1]) SPR_PUT(now_pos+1, x+1, l1>>6);
+				if (!trans_tbl[x+2]) SPR_PUT(now_pos+2, x+2, (l2>>4)&3);
+				if (!trans_tbl[x+3]) SPR_PUT(now_pos+3, x+3, (l1>>4)&3);
+				if (!trans_tbl[x+4]) SPR_PUT(now_pos+4, x+4, (l2>>2)&3);
+				if (!trans_tbl[x+5]) SPR_PUT(now_pos+5, x+5, (l1>>2)&3);
+				if (!trans_tbl[x+6]) SPR_PUT(now_pos+6, x+6, l2&3);
+				if (!trans_tbl[x+7]) SPR_PUT(now_pos+7, x+7, l1&3);
 			}
 			else{
-				if (l2>>6) *(now_pos)=cur_p[l2>>6];
-				if (l1>>6) *(now_pos+1)=cur_p[l1>>6];
-				if ((l2>>4)&3) *(now_pos+2)=cur_p[(l2>>4)&3];
-				if ((l1>>4)&3) *(now_pos+3)=cur_p[(l1>>4)&3];
-				if ((l2>>2)&3) *(now_pos+4)=cur_p[(l2>>2)&3];
-				if ((l1>>2)&3) *(now_pos+5)=cur_p[(l1>>2)&3];
-				if (l2&3) *(now_pos+6)=cur_p[l2&3];
-				if (l1&3) *(now_pos+7)=cur_p[l1&3];
+				SPR_PUT(now_pos,   x+0, l2>>6);
+				SPR_PUT(now_pos+1, x+1, l1>>6);
+				SPR_PUT(now_pos+2, x+2, (l2>>4)&3);
+				SPR_PUT(now_pos+3, x+3, (l1>>4)&3);
+				SPR_PUT(now_pos+4, x+4, (l2>>2)&3);
+				SPR_PUT(now_pos+5, x+5, (l1>>2)&3);
+				SPR_PUT(now_pos+6, x+6, l2&3);
+				SPR_PUT(now_pos+7, x+7, l1&3);
 			}
 		}
 	}
+#undef SPR_PUT
 }
 
 void lcd::bg_render_color(void *buf,int scanline)
@@ -417,16 +730,19 @@ void lcd::bg_render_color(void *buf,int scanline)
 	word share=0x0000;//prefix
 	trans_count=0;
 
+	/* See bg_render(): use WY latch, not WY<=LY. */
+	bool win_covers = (wy_triggered&&
+	                   ref_gb->get_regs()->WX<8&&
+	                   (ref_gb->get_regs()->LCDC&0x20));
 	// カラーではOFF機能が働かない?(僕のキャンプ場､モンコレナイト)
 	// OFF function does not work in color? (my campsite, Moncolle Night)
 	if (!(ref_gb->get_regs()->LCDC&0x80)/*||!(ref_gb->get_regs()->LCDC&0x01)*/||
-		(ref_gb->get_regs()->WY<=(dword)scanline&&ref_gb->get_regs()->WX<8&&(ref_gb->get_regs()->LCDC&0x20))){
+		win_covers){
 		if (!(ref_gb->get_regs()->LCDC&0x80)/*||!(ref_gb->get_regs()->LCDC&0x01)*/){
 			word *tmp_w=(word*)buf+160*scanline;
-			word tmp_dat=ref_gb->get_renderer()->map_color(0x7fff);
+			word tmp_dat=get_blank_color();
 			for (int t=0;t<160;t++)
 				*(tmp_w++)=tmp_dat;
-//			memset(()+160*scanline,0xff,160*2);
 		}
 		return;
 	}
@@ -459,11 +775,26 @@ void lcd::bg_render_color(void *buf,int scanline)
 	byte *trans=trans_tbl;
 	byte *priority=priority_tbl;
 
+	/* DMG-compat on CGB: ignore attr map; BGP indexes into BG palette 0. */
+	bool dmg_compat = ref_gb->dmg_compat_mode();
+	word dmg_pal[4];
+	if (dmg_compat) {
+		byte bgp = ref_gb->get_regs()->BGP;
+		for (int pi = 0; pi < 4; pi++)
+			dmg_pal[pi] = mapped_pal[0][(bgp >> (pi * 2)) & 3];
+	}
+
 	tile=*(now_tile++);
 	atr=*(now_atr++);
 
-	pal=mapped_pal[atr&7];
-	bank=(atr<<9)&0x1000;
+	if (dmg_compat) {
+		atr = 0;
+		pal = dmg_pal;
+		bank = 0;
+	} else {
+		pal=mapped_pal[atr&7];
+		bank=(atr<<9)&0x1000;
+	}
 	tmp_dat=(tile&0x80)?*(((atr&0x40)?now_share2:now_share)+(tile<<3)+bank):*(((atr&0x40)?now_pat2:now_pat)+(tile<<3)+bank);
 	calc1=tmp_dat;
 	calc2=tmp_dat>>7;
@@ -526,8 +857,14 @@ void lcd::bg_render_color(void *buf,int scanline)
 		tile=*(now_tile++);
 		atr=*(now_atr++);
 
-		pal=mapped_pal[atr&7];
-		bank=(atr<<9)&0x1000;
+		if (dmg_compat) {
+			atr = 0;
+			pal = dmg_pal;
+			bank = 0;
+		} else {
+			pal=mapped_pal[atr&7];
+			bank=(atr<<9)&0x1000;
+		}
 		tmp_dat=(tile&0x80)?*(((atr&0x40)?now_share2:now_share)+(tile<<3)+bank):*(((atr&0x40)?now_pat2:now_pat)+(tile<<3)+bank);
 
 		calc1=tmp_dat;
@@ -578,7 +915,7 @@ void lcd::bg_render_color(void *buf,int scanline)
 
 void lcd::win_render_color(void *buf,int scanline)
 {
-	if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x20)||ref_gb->get_regs()->WY>=(scanline+1)||ref_gb->get_regs()->WX>166){
+	if (!(ref_gb->get_regs()->LCDC&0x80)||!(ref_gb->get_regs()->LCDC&0x20)||!wy_triggered||ref_gb->get_regs()->WX>166){
 //		if ((ref_gb->get_regs()->WY>=(scanline+1))&&((ref_gb->get_regs()->LCDC&0x21)!=0x21))
 //			memset(((word*)buf)+160*scanline,0,160*2);
 		return;
@@ -598,10 +935,12 @@ void lcd::win_render_color(void *buf,int scanline)
 	byte *priority=priority_tbl;
 	byte tile;
 	int i;
+	/* WX 0..6: start at X=0 (gbe-plus / Star Wars Episode I Racer). */
+	int win_x=(ref_gb->get_regs()->WX<7)?0:(ref_gb->get_regs()->WX-7);
 
-	dat+=160*scanline+ref_gb->get_regs()->WX-7;
-	trans+=ref_gb->get_regs()->WX-7;
-	priority+=ref_gb->get_regs()->WX-7;
+	dat+=160*scanline+win_x;
+	trans+=win_x;
+	priority+=win_x;
 	byte *now_tile=ref_gb->get_cpu()->get_vram()+back+(((y>>3)-1)<<5);
 	byte *now_atr=ref_gb->get_cpu()->get_vram()+back+(((y>>3)-1)<<5)+0x2000;
 	word *now_share=(word*)(ref_gb->get_cpu()->get_vram()+share+((y&7)<<1));
@@ -613,11 +952,25 @@ void lcd::win_render_color(void *buf,int scanline)
 	byte atr;
 	word bank;
 
-	for (i=ref_gb->get_regs()->WX>>3;i<21;i++){
+	bool dmg_compat = ref_gb->dmg_compat_mode();
+	word dmg_pal[4];
+	if (dmg_compat) {
+		byte bgp = ref_gb->get_regs()->BGP;
+		for (int pi = 0; pi < 4; pi++)
+			dmg_pal[pi] = mapped_pal[0][(bgp >> (pi * 2)) & 3];
+	}
+
+	for (i=win_x>>3;i<21;i++){
 		tile=*(now_tile++);
 		atr=*(now_atr++);
-		bank=(atr<<9)&0x1000;
-		pal=mapped_pal[atr&7];
+		if (dmg_compat) {
+			atr = 0;
+			bank = 0;
+			pal = dmg_pal;
+		} else {
+			bank=(atr<<9)&0x1000;
+			pal=mapped_pal[atr&7];
+		}
 		tmp_dat=(tile&0x80)?*(((atr&0x40)?now_share2:now_share)+(tile<<3)+bank):*(((atr&0x40)?now_pat2:now_pat)+(tile<<3)+bank);
 		calc1=tmp_dat;
 		calc2=tmp_dat>>7;
@@ -675,12 +1028,28 @@ void lcd::sprite_render_color(void *buf,int scanline)
 	bool sp_size=(ref_gb->get_regs()->LCDC&0x04)?true:false;
 
 	word bank;
+	bool dmg_compat = ref_gb->dmg_compat_mode();
+	word dmg_obp[2][4];
+	if (dmg_compat) {
+		byte obp0 = ref_gb->get_regs()->OBP1;
+		byte obp1 = ref_gb->get_regs()->OBP2;
+		for (int pi = 0; pi < 4; pi++) {
+			dmg_obp[0][pi] = mapped_pal[8][(obp0 >> (pi * 2)) & 3];
+			dmg_obp[1][pi] = mapped_pal[9][(obp1 >> (pi * 2)) & 3];
+		}
+	}
 
 	for (i=39;i>=0;i--){
 		tile=oam[i*4+2];
 		atr=oam[i*4+3];
-		cur_p=mapped_pal[(atr&7)+8];
-		bank=(atr&0x08?0x2000:0);
+		if (dmg_compat) {
+			/* Bit 4 selects OBP0/OBP1; no CGB VRAM bank. */
+			cur_p = dmg_obp[(atr & 0x10) ? 1 : 0];
+			bank = 0;
+		} else {
+			cur_p=mapped_pal[(atr&7)+8];
+			bank=(atr&0x08?0x2000:0);
+		}
 
 		if (sp_size){ // 8*16
 			y=oam[i*4]-1;
@@ -777,6 +1146,29 @@ void lcd::sprite_render_color(void *buf,int scanline)
 void lcd::render(void *buf,int scanline)
 {
 	sprite_count=0;
+	check_wy_trigger();
+
+	/* SGB MASK_EN / VRAM TRNs: don't show transfer bitpatterns.
+	 * FREEZE keeps the previous frame; BLACK/COLOR0 fill the GB window.
+	 * Border changes fade separately (pending buffer + animation). */
+	/* sgb_color_active is a plain member read, so DMG/CGB skip the (non-inlined)
+	 * screen_blanked() call entirely — zero cost for non-SGB titles. */
+	if (sgb_color_active && ref_gb->get_sgb()->screen_blanked()) {
+		byte m = ref_gb->get_sgb()->mask_mode();
+		if (m == 2 || m == 3) {
+			word *line = ((word *)buf) + 160 * scanline;
+			word fill = (m == 3)
+				? m_sgb_pal[0][0]
+				: ref_gb->get_renderer()->map_color(0);
+			for (int t = 0; t < 160; t++)
+				line[t] = fill;
+			return;
+		}
+		/* Otherwise the screen is blanked because of MASK_FREEZE, a pending
+		 * VRAM transfer, or a border fade-out: leave the scanline untouched so
+		 * the last good frame is kept (never paint the raw transfer pattern). */
+		return;
+	}
 
 	if (ref_gb->get_rom()->get_info()->gb_type>=3){
 //		for (int i=0;i<64;i++)
@@ -788,7 +1180,10 @@ void lcd::render(void *buf,int scanline)
 			sprite_render_color(buf,scanline);
 		}
 		else{
-			memset(((word*)buf)+160*scanline,0x00,160*2);
+			word *line=((word*)buf)+160*scanline;
+			word blank=get_blank_color();
+			for (int t=0;t<160;t++)
+				line[t]=blank;
 			if (layer_enable[0])
 				bg_render_color(buf,scanline);
 			if (layer_enable[1])
@@ -804,7 +1199,10 @@ void lcd::render(void *buf,int scanline)
 			sprite_render(buf,scanline);
 		}
 		else{
-			memset(((word*)buf)+160*scanline,0x00,160*2);
+			word *line=((word*)buf)+160*scanline;
+			word blank=get_blank_color();
+			for (int t=0;t<160;t++)
+				line[t]=blank;
 			if (layer_enable[0])
 				bg_render(buf,scanline);
 			if (layer_enable[1])
@@ -815,16 +1213,32 @@ void lcd::render(void *buf,int scanline)
 	}
 }
 
-void lcd::serialize(serializer &s)
+void lcd::serialize(serializer &s, int version)
 {
-	s_VAR(cur_palette); set_palette(cur_palette);
-	s_ARRAY(m_pal16);
+	s_VAR(cur_palette);
+	if (version >= GB_SAVESTATE_V1) {
+		/* Do not call set_palette() here — it clears SGB colors and was run on
+		 * SAVE as well as LOAD, so creating a savestate in SGB mode wiped the
+		 * live palette back to the DMG preset. */
+		s_VAR(sgb_color_active);
+		s_ARRAY(m_pal16);
+		s_ARRAY(m_sgb_pal);
+		s_ARRAY(m_obp_sgb);
+	} else {
+		/* v0: set_palette on load, then restore m_pal16 from the buffer. */
+		if (s.mode() == serializer::LOAD_BUF)
+			set_palette(cur_palette);
+		s_ARRAY(m_pal16);
+	}
 	s_ARRAY(col_pal); // the only one that was in the original state format.
 	s_ARRAY(mapped_pal);
 	s_VAR(trans_count);
 	s_ARRAY(trans_tbl);
 	s_ARRAY(priority_tbl);
 	s_VAR(now_win_line);
+	/* wy_triggered not in savestate blob; infer from window line counter. */
+	if (s.mode()==serializer::LOAD_BUF)
+		wy_triggered=(now_win_line!=9);
 	s_VAR(mul);
 	s_VAR(sprite_count);
 	s_ARRAY(layer_enable);

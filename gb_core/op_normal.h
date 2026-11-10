@@ -204,7 +204,7 @@ case 0xF9: REG_SP=REG_HL;break; //LD SP,HL : 11 111 001 :state 6
 case 0xC5: REG_SP-=2;writew(REG_SP,REG_BC);break; //PUSH BC
 case 0xD5: REG_SP-=2;writew(REG_SP,REG_DE);break; //PUSH DE
 case 0xE5: REG_SP-=2;writew(REG_SP,REG_HL);break; //PUSH HL
-case 0xF5: write(REG_SP-2,z802gb[REG_F]|0xe);write(REG_SP-1,REG_A);REG_SP-=2;break; //PUSH AF // 未使用ビットは1になるみたい(メタルギアより)
+case 0xF5: write(REG_SP-2,z802gb[REG_F]);write(REG_SP-1,REG_A);REG_SP-=2;break; //PUSH AF
 
 //POP rq : 11 rq0 001 : state 10 (12?)
 case 0xC1: REG_B=read(REG_SP+1);REG_C=read(REG_SP);REG_SP+=2;break; //POP BC
@@ -413,35 +413,13 @@ case 0xFB: regs.I=1;int_disable=true;break; //EI : state 4
 
 case 0x76:
 #ifndef EXSACT_CORE
-	if (ref_gb->get_regs()->TAC&0x04){//タイマ割りこみ
-		word tmp;
-		tmp=ref_gb->get_regs()->TIMA+(sys_clock+rest_clock)/timer_clocks[ref_gb->get_regs()->TAC&0x03];
-
-		if (tmp&0xFF00){//HALT中に割りこみがかかる場合
-			total_clock+=(256-ref_gb->get_regs()->TIMA)*timer_clocks[ref_gb->get_regs()->TAC&0x03]-sys_clock;
-			rest_clock-=(256-ref_gb->get_regs()->TIMA)*timer_clocks[ref_gb->get_regs()->TAC&0x03]-sys_clock;
-			ref_gb->get_regs()->TIMA=ref_gb->get_regs()->TMA;
-			halt=true;
-			REG_PC--;
-			irq(INT_TIMER);
-			sys_clock=(sys_clock+rest_clock)&(timer_clocks[ref_gb->get_regs()->TAC&0x03]-1);
-		}
-		else{
-			ref_gb->get_regs()->TIMA=tmp&0xFF;
-			sys_clock=(sys_clock+rest_clock)&(timer_clocks[ref_gb->get_regs()->TAC&0x03]-1);
-			halt=true;
-			total_clock+=rest_clock;
-			rest_clock=0;
-			REG_PC--;
-		}
-	}
-	else{
-		halt=true;
-		total_clock+=rest_clock;
-		div_clock+=rest_clock;
-		rest_clock=0;
-		REG_PC--;
-	}
+	/* Burn remaining slice in one go (keeps HALT cheap). DIV/TIMA via
+	 * falling-edge timer_advance — same model as normal opcodes. */
+	halt=true;
+	REG_PC--;
+	total_clock+=rest_clock;
+	timer_advance(rest_clock);
+	rest_clock=0;
 	tmp_clocks=0;
 #else
 	halt=true;
